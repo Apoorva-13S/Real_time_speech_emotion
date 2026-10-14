@@ -1,0 +1,8 @@
+transformers
+torch
+numpy
+librosa
+sounddevice
+scipy
+scikit-learn
+matplotlib

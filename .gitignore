@@ -218,3 +218,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Speech emotion project files
+data/
+datasets/
+ravdess.zip
+
+# Downloaded and trained model weights
+checkpoints/
+models/
+final_model/
+final_model_v2/
+experiment_2/
+
+# Audio recordings and generated outputs
+*.wav
+*.mp3
+*.flac
+
+# Python and experiment outputs
+results/
