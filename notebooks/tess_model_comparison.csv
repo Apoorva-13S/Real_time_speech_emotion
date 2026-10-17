@@ -1,0 +1,12 @@
+Model,Accuracy (%),Weighted F1,Status
+Previous checkpoint 572,34.25,0.2851,OK
+Previous checkpoint 715,34.62,0.2855,OK
+Previous final model,34.25,0.2851,OK
+Experiment 2 - 143,34.46,0.2807,OK
+Experiment 2 - 286,34.46,0.2816,OK
+Experiment 2 - 429,34.33,0.2803,OK
+Previous final model v2,34.33,0.2803,OK
+Combined epoch 1,40.12,0.3565,OK
+Combined epoch 2,52.54,0.5267,OK
+Combined epoch 3,48.12,0.4797,OK
+Combined best,48.12,0.4797,OK
