@@ -1,0 +1,1246 @@
+================================================================================
+REAL_TIME_SPEECH_EMOTION - ERROR ANALYSIS, DEBUGGING GUIDE AND FIX LIST
+================================================================================
+Repository : Apoorva-13S/Real_time_speech_emotion
+Branch     : arena/1ce82115-real-time-speech-emotion
+Base commit: cb02a181439e04c56229df91c73cfcbe617cc1d0 (main)
+Analysed    : static read of every repo file + extraction of all saved cell
+              outputs / tracebacks from notebooks/speech_emotion_finetuning_v3.ipynb
+Scope       : every bug, design fault, environment trap and reproducibility
+              problem found, plus concrete debugging steps for each one.
+
+Nothing in the repository was modified except the addition of this file.
+
+--------------------------------------------------------------------------------
+0. HOW TO USE THIS DOCUMENT
+--------------------------------------------------------------------------------
+Section 1  Repository map and what actually runs.
+Section 2  Issue index (one line per issue, severity-ranked).
+Section 3  BLOCKER issues, full write-up + fix.
+Section 4  CRITICAL correctness / evaluation issues.
+Section 5  HIGH severity pipeline and training issues.
+Section 6  MEDIUM / LOW issues and code smells.
+Section 7  Environment and dependency debugging (venv, wheel conflicts, PortAudio).
+Section 8  Microphone / audio I/O debugging.
+Section 9  Model download / HuggingFace debugging.
+Section 10 Notebook (Colab) debugging and the correct cell run order.
+Section 11 Dataset acquisition debugging (CREMA-D LFS, RAVDESS, TESS).
+Section 12 Training debugging (OOM, NaN, slow, checkpoint size, resume).
+Section 13 Evaluation debugging (metric traps, leakage, absent classes).
+Section 14 Error-message -> cause -> fix lookup table.
+Section 15 Verification checklist / smoke tests.
+Section 16 Ready-to-apply patch snippets.
+Section 17 Facts measured from the committed notebook outputs (evidence log).
+Section 18 Open questions that cannot be answered from the repo.
+
+Severity legend:
+  BLOCKER   - the documented workflow cannot complete, or ships a wrong result
+  CRITICAL  - result is wrong / invalid, silently
+  HIGH      - will bite a normal user or silently degrade results
+  MEDIUM    - real bug, workaround exists
+  LOW       - cosmetic, dead code, style, documentation drift
+
+--------------------------------------------------------------------------------
+1. REPOSITORY MAP
+--------------------------------------------------------------------------------
+File                                   Role / state
+-------------------------------------  ---------------------------------------
+README.md                              Project overview. Claims 11,278 samples,
+                                       64.78% val acc, 52.54% TESS acc.
+notebooks/README.md                    Training/eval summary numbers.
+notebooks/speech_emotion_finetuning_v3.ipynb
+                                       107 cells, 1.1 MB, 94 cells with saved
+                                       output, 0 images. This is the only place
+                                       where training exists. Executed
+                                       out-of-order; contains ~7 recorded
+                                       tracebacks.
+notebooks/tess_model_comparison.csv    The 11-checkpoint result table (2 pairs
+                                       of rows are the same model, see C-7).
+live_emotion.py                        Real-time mic loop using the THIRD-PARTY
+                                       model Dpngtm/wav2vec2-emotion-recognition,
+                                       not the model this repo trained.
+tes_audio.py                           Batch file classifier (filename typo).
+test_microphone.py                     5-second mic smoke test.
+test_model.py                          Loads third-party model, prints labels.
+requirements.txt                       8 unpinned packages; missing 6 that the
+                                       code actually imports.
+.gitignore                             Standard GitHub Python template.
+
+Important: there is NO .py module for the trained model, NO dataset index, NO
+checkpoint, NO tests, NO CI, NO LICENSE, NO pinned environment, and no script
+that reproduces any number in the README. Model weights and the index CSV live
+only in the author's Google Drive.
+
+What actually runs today, on a clean machine:
+  python test_microphone.py   -> works if a mic + PortAudio exist
+  python test_model.py        -> works if internet + HF reachable
+  python tes_audio.py         -> works on a valid local audio file
+  python live_emotion.py      -> works, but predicts with the WRONG (third
+                                 party) model; the repo's own model is unused
+  the notebook                -> cannot be run anywhere except Colab with the
+                                 author's Drive layout
+
+--------------------------------------------------------------------------------
+2. ISSUE INDEX
+--------------------------------------------------------------------------------
+ID     Sev       Area            One-line summary
+-----  --------  --------------  ---------------------------------------------
+B-1    BLOCKER   live pipeline   live_emotion.py loads the third-party model,
+                                 never the trained checkpoint -> repo's claim
+                                 not demonstrable
+B-2    BLOCKER   docs            No instructions for obtaining / placing model
+                                 weights; README defers to a doc that does not
+                                 exist
+B-3    BLOCKER   notebook        Notebook is Colab+Drive-locked; hard-coded
+                                 /content/... paths, cannot run locally
+B-4    BLOCKER   notebook        Cells executed out of order -> hard
+                                 NameError (train_df, train_dataset)
+C-1    CRITICAL  evaluation      All 400 TESS "ps" (pleasant surprise) files are
+                                 dropped by the final label map -> test set has
+                                 6 classes, not 8; reported numbers are 6-class
+C-2    CRITICAL  evaluation      No "calm" and no "surprised" in the final test
+                                 set, yet the model has 8 outputs; macro F1
+                                 collapses to 0.36 while weighted F1 reports 0.48
+C-3    CRITICAL  evaluation      Checkpoint chosen by TESS score (epoch_2), so
+                                 52.54% is optimistically biased; "best" dir is
+                                 a different, worse checkpoint (48.12%)
+C-4    CRITICAL  evaluation      Cell 98 filters out samples whose PREDICTION is
+                                 out of vocabulary -> survivorship bias; 400
+                                 neutral samples vanish from the accuracy
+C-5    CRITICAL  evaluation      Dpngtm model scored 99.88% on TESS because TESS
+                                 was in its training data -> contamination used
+                                 as a comparison row
+C-6    CRITICAL  data            Cell 71 silently trained on 1,139 of 7,111
+                                 recordings (84% dropped) after a silent
+                                 "unreadable" filter
+C-7    CRITICAL  reporting       tess_model_comparison.csv lists the same model
+                                 twice under two names (572 == final_model,
+                                 429 == final_model_v2)
+H-1    HIGH      environment     requirements.txt unpinned + 6 missing packages
+                                 (datasets, soundfile, tqdm, accelerate,
+                                 huggingface_hub, torchaudio)
+H-2    HIGH      environment     sounddevice needs PortAudio system library;
+                                 no documentation, and Colab has no mic
+H-3    HIGH      notebook        datasets>=3.6 Audio() uses torchcodec/FFmpeg ->
+                                 RuntimeError "Invalid data found" on CREMA-D
+H-4    HIGH      data            CREMA-D from the GitHub archive is LFS
+                                 pointers, not audio -> every file unreadable
+H-5    HIGH      data            Cell 85 batch cache resume only checks the
+                                 filename, so stale/corrupt batches survive a
+                                 re-index and can leak train into test
+H-6    HIGH      training        No LR warmup, no scheduler, no GradScaler for
+                                 fp16; wav2vec2 fine-tuning commonly diverges
+H-7    HIGH      training        Severe class imbalance (calm/surprised 152 of
+                                 7,109 = 2.1%) with no weighting/sampler
+H-8    HIGH      storage         ~380 MB weights x 4 checkpoints + optimizer
+                                 states (~700 MB each) + a Drive copytree and a
+                                 ZIP backup -> Drive quota / slow sync failures
+H-9    HIGH      code            Broad `except Exception: continue` in 5 cells
+                                 makes data loss invisible (see C-6)
+M-1    MEDIUM    live_emotion    Unused librosa import; no device selection, no
+                                 RMS gate, no normalisation, no stream cleanup
+M-2    MEDIUM    live_emotion    Hard 3 s block recording: clips words, ignores
+                                 the model's 6 s window, no latency control
+M-3    MEDIUM    live_emotion    CPU by default (`pipeline` without device) and
+                                 re-runs the whole model per block
+M-4    MEDIUM    tes_audio       input() path: quotes/backslashes from drag-drop
+                                 break it; no existence check; no extension check
+M-5    MEDIUM    tes_audio       top_k=7 hides one of the 8 labels; file named
+                                 "tes_audio.py" (typo for test_audio.py)
+M-6    MEDIUM    notebook        Cell 85 stores variable-length arrays as
+                                 np.savez(dtype=object) -> needs allow_pickle=True
+M-7    MEDIUM    notebook        Cell 66 hard-codes .../CREMA-D-master/AudioWAV
+                                 while cell 65 discovered the path dynamically
+M-8    MEDIUM    notebook        Cell 46 unescaped spaces in URL -> InvalidURL
+                                 (recorded traceback)
+M-9    MEDIUM    notebook        Cell 73 uses tarfile.extractall(filter=...)
+                                 which needs Python >= 3.12
+M-10   MEDIUM    notebook        Cell 76 builds an unused get_speaker_id() and
+                                 returns None for TESS -> dead code trap
+M-11   MEDIUM    notebook        Cell 89 imports sounddevice inside Colab ->
+                                 ModuleNotFoundError (recorded traceback)
+L-1    LOW       repo hygiene    No LICENSE, no CI, no tests, no pyproject.toml
+L-2    LOW       repo hygiene    1.1 MB notebook with all outputs committed
+L-3    LOW       docs            README says requirements "will be provided"
+                                 although the file exists; numbers drift between
+                                 README, notebooks/README and the notebook
+L-4    LOW       code            Dead imports (librosa in live_emotion.py;
+                                 scipy, matplotlib in requirements.txt)
+L-5    LOW       code            Comment says "stereo-shaped array" for a mono
+                                 recording; peak-based silence gate
+L-6    LOW       notebook        Duplicate/obsolete cells (49/53/58/66/75/80/85
+                                 all rebuild the index); no clear canonical path
+
+--------------------------------------------------------------------------------
+3. BLOCKER ISSUES
+--------------------------------------------------------------------------------
+
+B-1  live_emotion.py uses a third-party model, not the trained checkpoint
+--------------------------------------------------------------------------
+Where : live_emotion.py:10-13, test_model.py:4, tes_audio.py:5
+Code  :
+    classifier = pipeline("audio-classification",
+                          model="Dpngtm/wav2vec2-emotion-recognition")
+Why it matters:
+  * The repo's whole contribution is combined_model_v1/epoch_2 (8 classes,
+    52.54% TESS). live_emotion.py never touches it.
+  * Dpngtm's checkpoint was trained on TESS/CREMA/RAVDESS too, so the demo
+    "works" but demonstrates a different, unmeasured model.
+  * Label strings from that model may not match this repo's taxonomy
+    ("surprise" vs "surprised", "anger" vs "angry", no "calm"). Any label
+    comparison with the trained model will be wrong.
+  * README "Current Status" already admits integration is pending - but the
+    file name implies the pipeline is finished.
+Debug / fix:
+  1. Confirm what the third-party model actually emits:
+         python test_model.py
+     Compare the printed id2label with:
+         ["angry","calm","disgust","fearful","happy","neutral","sad","surprised"]
+  2. Point the pipeline at the local checkpoint instead:
+         LOCAL = "./checkpoints/combined_model_v1/epoch_2"
+         classifier = pipeline("audio-classification", model=LOCAL,
+                               feature_extractor=LOCAL, device=-1)
+     (device=-1 = CPU, device=0 = first GPU.)
+  3. Verify the two agree on a known file (tes_audio.py) before trusting the
+     live loop.
+  4. Rename the third-party model usage to demo_pretrained.py so nobody
+     mistakes it for the project model.
+
+B-2  No way to obtain the trained weights
+--------------------------------------------------------------------------
+Where : README.md "Running the Project" (last paragraph), notebooks/README.md:22
+Symptoms:
+  * from_pretrained("./checkpoints/combined_model_v1/epoch_2") ->
+    OSError: Incorrect path_or_model_id
+  * cell 89 / 106 raise FileNotFoundError on the Drive path.
+Fix:
+  * Publish the checkpoint on the HF Hub (or a GitHub release) and document:
+        huggingface-cli download <user>/wav2vec2-emotion-8cls \
+            --local-dir checkpoints/combined_model_v1/epoch_2
+  * Document that a checkpoint dir must contain: config.json,
+    model.safetensors (or pytorch_model.bin), preprocessor_config.json.
+  * Add a `download_model.py` that verifies the file list and size before use.
+  * State the SHA256 of the weights so users can detect truncated downloads.
+
+B-3  The notebook only runs inside Colab with the author's Drive
+--------------------------------------------------------------------------
+Where : 60+ cells; e.g. 5, 6, 25, 34, 38, 44, 62, 82, 84, 85, 86, 88, 92, 106
+Pattern:
+    BASE = "/content/drive/MyDrive/SpeechEmotionProject"
+    from google.colab import drive; drive.mount('/content/drive')
+Symptoms on any other machine:
+    ModuleNotFoundError: No module named 'google'
+    FileNotFoundError: /content/CREMA-D/AudioWAV
+    FileNotFoundError: /content/drive/MyDrive/...
+Fix:
+  * Introduce one config cell and nothing else hard-coded:
+        DATA_ROOT  = Path(os.environ.get("SEMO_DATA",  "./data"))
+        CKPT_ROOT  = Path(os.environ.get("SEMO_CKPT",  "./checkpoints"))
+        IS_COLAB   = "google.colab" in sys.modules
+        if IS_COLAB: drive.mount('/content/drive')
+  * Replace every "/content/..." literal with DATA_ROOT / ... .
+  * Prefer Kaggle/Colab "Secrets" or env vars over absolute Drive paths.
+
+B-4  Cells are executed out of order -> hard NameError
+--------------------------------------------------------------------------
+Recorded tracebacks in the committed notebook:
+  cell 42  NameError: name 'train_df' is not defined
+  cell 78  NameError: name 'train_dataset' is not defined
+  cell 81  NameError: name 'train_df' is not defined
+Cause: cells 38-41 were edited/rerun in a different order than 42/78/81 assume;
+the kernel that produced those outputs had lost train_df (a known Colab
+pitfall: restart, or a cell that raised midway like cell 40's dependency on a
+`df` that did not exist yet).
+Fix:
+  1. After editing, use Runtime > Restart and run all, and keep the notebook
+     runnable top-to-bottom. Any cell that depends on another must re-create
+     it or assert it:
+         assert "train_df" in globals(), "run the index cell first"
+  2. Split the notebook into real modules: build_index.py, preprocess.py,
+     train.py, evaluate.py, with a Makefile/CLI. Notebooks then only demo.
+  3. Add a guard cell at the top:
+         %load_ext autoreload
+         %autoreload 2
+
+--------------------------------------------------------------------------------
+4. CRITICAL CORRECTNESS / EVALUATION ISSUES
+--------------------------------------------------------------------------------
+
+C-1  The final pipeline drops all 400 TESS "ps" (pleasant surprise) files
+--------------------------------------------------------------------------
+Where : cells 75, 80, 83, 85 - the authoritative `tess_map` is
+            tess_map = {"angry","disgust","fear","happy","neutral",
+                        "sad","surprise","surprised"}
+        but TESS filenames end in `_ps` (cell 21 shows `ps: 400`).
+Evidence:
+  * cell 21  : TESS total 2,800; ps = 400
+  * cell 71  : TESS processed 2,800   (its map DID contain "ps")
+  * cell 75/85: index TESS = 2,400    (ps silently discarded)
+  * cell 88 classification report: `surprised  support 0`
+Consequence: the headline "TESS test: 2,400" is 6 emotions x 400, not 8 x 300.
+The "surprised" class is RAVDESS-only in the index (192 rows) and never tested.
+Fix:
+    tess_map = {
+        "angry": "angry", "disgust": "disgust", "fear": "fearful",
+        "happy": "happy", "neutral": "neutral", "sad": "sad",
+        "ps": "surprised", "pleasant surprise": "surprised",
+        "surprise": "surprised", "surprised": "surprised",
+    }
+    # and FAIL LOUDLY on anything unmatched:
+    unknown = set(codes) - set(tess_map)
+    assert not unknown, f"unmapped TESS labels: {unknown}"
+Debug check:
+    python - <<'PY'
+    from pathlib import Path
+    from collections import Counter
+    c = Counter(p.stem.split("_")[-1].lower()
+                for p in Path("data/tess").rglob("*.wav"))
+    print(c)   # expect exactly {'angry':400,...,'ps':400}
+    PY
+
+C-2  Classes present in the model but absent in the test set
+--------------------------------------------------------------------------
+Facts: 8 output labels; test set contains 6. `calm` and `surprised` have zero
+support. Any prediction of those two classes is automatically wrong, yet
+sklearn's *weighted* F1 counts them with weight 0, so the reported 0.5267
+never shows the damage.
+Evidence: cell 88 -> macro avg F1 0.36, weighted avg F1 0.48; calm/surprised
+rows are all zeros.
+Two defensible options:
+  (a) 6-class model: merge calm+neutral into neutral, map ps -> surprised,
+      retrain, and state "6 classes" everywhere; or
+  (b) keep 8 classes and guarantee all 8 appear in the test set, then report
+      BOTH macro and weighted F1 plus a per-class table.
+Never report a single weighted-F1 number for an 8-class model tested on 6.
+
+C-3  The reported checkpoint was selected using the test set
+--------------------------------------------------------------------------
+Evidence:
+  * cell 86: "best" is chosen by validation weighted F1 ->
+        epoch1 0.4710, epoch2 0.6300, epoch3 0.6461  => best = epoch_3
+  * cell 92: TESS per epoch -> epoch1 40.12, epoch2 52.54, epoch3 48.12,
+        and "Combined best" = 48.12 (i.e. epoch_3)
+  * cell 94: the backup copies `combined_model_v1/epoch_2` as
+        "best_tess_checkpoint"
+So the README's 52.54% is the maximum over three checkpoints scored on TESS -
+an optimistic estimate. The validation-best model is materially worse on TESS.
+Fix:
+  * Create a real held-out set: split speakers into train / val / test.
+    Two datasets is not enough (CREMA-D + RAVDESS train, TESS test, nothing
+    left for val).
+  * Select on val only; report test once, for the selected checkpoint.
+  * If you must keep TESS as the reported set, report the whole epoch curve
+    (40.12 / 52.54 / 48.12) and label 52.54% as "best of three epochs on the
+    reported set", never as an independent test score.
+
+C-4  Evaluation filters samples by their own prediction (survivorship bias)
+--------------------------------------------------------------------------
+Where : cells 98-99 and the surrounding text.
+Code  :
+    if predicted not in set(emotion_map.values()):
+        skipped.append(filename)
+        continue
+Evidence: cell 98 printed "Evaluated: 2400 / Skipped: 400 / Accuracy: 99.88%"
+and the classification report has NO "neutral" row. The pipeline never
+produced a label that mapped into the taxonomy (its neutral-ish label likely
+differs), so all 400 neutral files were deleted from the scoring set - after
+seeing the prediction.
+Consequence: accuracy is computed only on samples the model handled, which is
+exactly the bias evaluation must avoid.
+Fix: decide the label mapping BEFORE scoring, map every prediction through an
+explicit alias table, and count unmapped predictions as errors (or report
+coverage separately), e.g.:
+    predicted = alias.get(raw_label, "__other__")
+    # "__other__" then contributes as a wrong prediction to y_pred
+Also report: n_total, n_scored, coverage, and accuracy over n_total.
+
+C-5  TESS is inside the compared model's training data
+--------------------------------------------------------------------------
+Facts: Dpngtm/wav2vec2-emotion-recognition reports TESS among its training
+datasets (notebook cell 2). Cell 98 then scores it on TESS and gets 99.88%.
+That is textbook train/test contamination, not a baseline.
+Fix:
+  * Delete that row, or label it "in-domain / contaminated, not comparable".
+  * For an honest baseline, evaluate the third-party model on a corpus it did
+    not train on (e.g. SAVEE, or IEMOCAP), and the local model on the same.
+  * State dataset provenance for every compared checkpoint.
+
+C-6  A silent filter trained the model on 1,139 of 7,111 clips
+--------------------------------------------------------------------------
+Where : cells 69-71.
+Evidence (committed output of cell 71):
+    train_df: skipping 5972 unreadable files
+    val_df:   skipping 1470 unreadable files
+    Train: 1139  Validation: 300  TESS: 2800
+Cause: CREMA-D was fetched from the GitHub *source archive*
+(CheyneyComputerScience/CREMA-D/archive/refs/heads/master.zip, cell 65). In
+that repo the .wav files are Git LFS pointers, so every CREMA-D file fails
+`sf.info()` and is dropped. The notebook then continues and happily trains on
+RAVDESS only. Cell 69's torchcodec error names the exact symptom:
+    RuntimeError: SingleStreamDecoder ... Could not open input file:
+    .../1029_MTI_NEU_XX.wav Invalid data found when processing input
+Fix / guardrails:
+    before = len(train_df)
+    valid = train_df["path"].map(readable_audio)
+    print(f"dropped {before - valid.sum()} / {before} "
+          f"({100*(1-valid.mean()):.1f}%)")
+    assert valid.mean() > 0.95, "REFUSING TO TRAIN: >5% of audio unreadable"
+    assert train_df["dataset"].nunique() == 2, "one dataset vanished"
+    # also verify a real WAV header:
+    head = open(path, "rb").read(12)
+    assert head[:4] == b"RIFF" and head[8:12] == b"WAVE", "LFS pointer/not a WAV"
+Detection one-liner for LFS pointers:
+    find data/crema -name '*.wav' -size -1k | head
+    # and: head -c 64 any.wav   -> starts with "version https://git-lfs..."
+
+C-7  Two pairs of "different" checkpoints are the same model
+--------------------------------------------------------------------------
+tess_model_comparison.csv:
+    Previous checkpoint 572   34.25  0.2851  ==  Previous final model 34.25 0.2851
+    Experiment 2 - 429        34.33  0.2803  ==  Previous final model v2 34.33 0.2803
+So the "11 checkpoints compared" claim covers 9 distinct models. Add a weight
+hash column (sha256 of model.safetensors) and deduplicate before publishing, or
+explain that final_model is a copy of checkpoint-572.
+
+--------------------------------------------------------------------------------
+5. HIGH SEVERITY ISSUES
+--------------------------------------------------------------------------------
+
+H-1  requirements.txt is unpinned and incomplete
+--------------------------------------------------------------------------
+Current: transformers, torch, numpy, librosa, sounddevice, scipy, scikit-learn,
+matplotlib.
+Used by the code but missing: soundfile (sf.read/sf.info - used in 6 cells),
+datasets (Dataset/DatasetDict), tqdm, accelerate (not strictly needed for the
+custom loop, but needed if Trainer is reintroduced), huggingface_hub
+(hf_hub_download), and torchaudio/ffmpeg for some decoders. IPython is needed
+by cell 89 (Audio/display).
+Unused: scipy, matplotlib (nothing imports them).
+Why unpinned is a real bug here:
+  * transformers 4.x -> 5.x changed pipeline/feature-extractor behaviour and
+    removed several deprecated args.
+  * numpy 2.x breaks old librosa/numba wheels ->
+    "A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x".
+  * librosa 0.10+ dropped audioread for mp3 (needs libsndfile >= 1.1 or ffmpeg).
+  * datasets >= 3.6 moved Audio decoding to torchcodec (see H-3).
+Fix (pick one strategy):
+  * requirements.txt with conservative bounds, e.g.
+        torch>=2.2,<3
+        transformers>=4.41,<5
+        datasets>=2.19,<3.6      # keeps soundfile decoding, avoids torchcodec
+        librosa>=0.10.1,<0.11
+        numpy>=1.24,<2
+        soundfile>=0.12
+        scikit-learn>=1.3,<1.6
+        sounddevice>=0.4.6
+        tqdm>=4.66
+        huggingface_hub>=0.23
+        ipython
+  * and a lock file (pip freeze > requirements.lock.txt) that is known-good.
+Debug commands:
+    pip check
+    python -c "import numpy, librosa, transformers, datasets; \
+               print(numpy.__version__, librosa.__version__, \
+                     transformers.__version__, datasets.__version__)"
+    python -c "import soundfile as sf; print(sf.__libsndfile_version__)"
+
+H-2  sounddevice requires the PortAudio system library
+--------------------------------------------------------------------------
+Symptom:
+    OSError: PortAudio library not found
+    sounddevice.PortAudioError: Error querying device -1
+    (Colab) ModuleNotFoundError: No module named 'sounddevice'  <- cell 89
+Fix:
+    Debian/Ubuntu : sudo apt-get install -y libportaudio2 portaudio19-dev
+    Fedora        : sudo dnf install portaudio
+    macOS         : brew install portaudio
+    Windows       : bundled with the wheel (no action)
+    Colab         : there is no microphone device; sd.rec() can never work.
+                    Record in the browser (google.colab.output.eval_js + JS
+                    MediaRecorder) and upload the blob, or use a local machine.
+Verify:
+    python -c "import sounddevice as sd; print(sd.query_devices())"
+    python -c "import sounddevice as sd; print(sd.default.device)"
+
+H-3  datasets Audio() decoding uses torchcodec/FFmpeg
+--------------------------------------------------------------------------
+Where : cell 68-69 (cast_column("audio", Audio(sampling_rate=16000))).
+Symptom (recorded): RuntimeError from torchcodec SingleStreamDecoder,
+"Invalid data found when processing input".
+Causes: (a) garbage/LFS-pointer files, (b) no FFmpeg shared libs installed,
+(c) torchcodec wheel incompatible with the torch build.
+Fixes:
+  * Pin datasets < 3.6, or
+    pip install "datasets<3.6" soundfile
+  * Or install FFmpeg: apt-get install -y ffmpeg (and libavcodec/libavformat).
+  * Or bypass datasets' decoder entirely (what cell 71 did) and read with
+    soundfile + librosa.resample, but keep the assertions from C-6.
+Verify:
+    python -c "import datasets; print(datasets.__version__)"
+    python -c "import torchcodec; print(torchcodec.__version__)"
+    ffmpeg -version | head -1
+
+H-4  CREMA-D from GitHub = Git LFS pointers
+--------------------------------------------------------------------------
+See C-6. Two working acquisition routes:
+  * HF dataset: repo_id="myleslinder/crema-d", filename="data/crema_d.tar.gz",
+    repo_type="dataset"  (what cell 73 does) -> 7,439 usable WAVs.
+  * Git LFS clone (cell 12): git lfs install; git clone
+    https://gitlab.com/cs-cooper-lab/crema-d-mirror.git
+    Requires git-lfs (cell 10) and ~3.4 GB.
+Validation after download:
+    for f in data/crema/*.wav; do head -c4 "$f"; echo; done | sort -u
+    # must print only RIFF
+    python -c "import soundfile as sf; print(sf.info('data/crema/1029_MTI_NEU_XX.wav'))"
+
+H-5  Batch-cache resume can mix stale data across splits
+--------------------------------------------------------------------------
+Where : cell 85 process_split() - it skips batch_id already present on disk.
+Symptom class:
+  * A crash mid-write leaves a truncated .npz that is skipped forever.
+  * Re-running the index with a different split (different random_state, fixed
+    ps mapping, dedupe change) does NOT invalidate old batch files, so train
+    batches can contain rows that are in the new validation/test split.
+  * Silent metric inflation that no error message will ever reveal.
+Fix:
+  * Version the cache directory by a fingerprint of the split:
+        fp = hashlib.sha256(
+            "".join(sorted(train_df["path"])).encode()).hexdigest()[:12]
+        split_dir = save_root / f"train-{fp}"
+    or write a manifest.json with counts + max mtime and refuse to reuse on
+    mismatch.
+  * Validate every npz on load: same number of arrays, labels dtype int64,
+    len(input_values) == len(labels).
+  * Delete + rebuild when the index changes (make it explicit, not automatic).
+  * Never write a partially finished batch: np.savez to a tmp file then
+    os.replace().
+
+H-6  Missing LR warmup / scheduler / GradScaler
+--------------------------------------------------------------------------
+Where : cell 86.
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)  # no scheduler
+    with torch.autocast(device_type="cuda", dtype=torch.float16): ...
+    loss.backward(); ... optimizer.step()                        # no scaler
+Why it matters: wav2vec2 fine-tuning with a freshly initialised classification
+head needs LR warmup (typically 10% of steps) and often a lower backbone LR;
+without it the first steps can destroy the pretrained encoder. fp16 autocast
+without a GradScaler can silently underflow small gradients (NaN/plateau).
+Fix:
+    from transformers import get_cosine_schedule_with_warmup
+    from torch.amp import GradScaler
+    total = len(train_loader) * EPOCHS // ACCUMULATION_STEPS
+    sched = get_cosine_schedule_with_warmup(optimizer,
+              int(0.1 * total), total)
+    scaler = GradScaler(enabled=(device.type == "cuda"))
+    ...
+    scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)
+    clip_grad_norm_(model.parameters(), 1.0)
+    scaler.step(optimizer); scaler.update(); sched.step()
+Also log the LR and grad norm; a stuck grad norm > 10 means instability.
+
+H-7  Class imbalance with no correction
+--------------------------------------------------------------------------
+Measured (cell 76, final index):
+    angry 1172, disgust 1172, fearful 1171, happy 1170, sad 1172,
+    neutral 948, calm 152, surprised 152   (calm/surprised = 2.1%)
+Consequences: the model rarely predicts calm/surprised (it costs little in
+weighted loss), and those two classes are exactly the ones missing from the
+test set - so nothing catches the failure.
+Fixes (cheapest first):
+  * Merge calm into neutral (they are acoustically near-identical in acted
+    corpora and Dpngtm's card already merges them) -> 7 classes, removes the
+    152-sample class.
+  * Or use class weights: w_c = N / (C * n_c) in the CE loss.
+  * Or a WeightedRandomSampler, plus report macro F1 so minorities count.
+  * Never report accuracy alone on this distribution.
+
+H-8  Checkpoint storage blow-up on Google Drive
+--------------------------------------------------------------------------
+Per epoch the notebook writes:
+  epoch_N/model.safetensors        ~380 MB
+  epoch_N/training_state.pt        ~700 MB  (AdamW exp_avg + exp_avg_sq)
+  plus `best/` (~380 MB) and cell 94's copytree (~380 MB) and a ZIP (~380 MB)
+=> roughly 4 GB for a 380 MB model. Drive free tier is 15 GB total, and Drive
+writes during training are slow enough to stall the loop.
+Fixes:
+  * Save the optimizer state only on the last epoch, or keep it on /content.
+  * Save weights only: model.save_pretrained(dir, safe_serialization=True).
+  * Use `torch.save({...}, ..., _use_new_zipfile_serialization=True)` and no
+    optimizer state when resuming is not needed.
+  * Do the ZIP backup once, outside the loop, and delete the intermediate
+    copies; or push the checkpoint to the HF Hub.
+
+H-9  Broad exception swallowing
+--------------------------------------------------------------------------
+Cells 71, 77, 81, 83, 85 all do:
+    except Exception:
+        continue            # or skipped += 1
+The user sees only a count, never which file or why. This is what allowed C-6
+(84% data loss) to reach a trained model.
+Fix:
+    fails = []
+    ...
+    except Exception as e:
+        fails.append((path, type(e).__name__, str(e)[:120]))
+    if fails:
+        pd.DataFrame(fails, columns=["path","err","detail"]).to_csv(
+            f"failures_{name}.csv", index=False)
+        print(f"{len(fails)} failures - see failures_{name}.csv")
+    assert len(fails) < 0.05 * len(frame), "too many failures, aborting"
+
+--------------------------------------------------------------------------------
+6. MEDIUM / LOW ISSUES
+--------------------------------------------------------------------------------
+
+M-1..M-3  live_emotion.py
+  (a) `import librosa` is unused (line 4) but still a hard dependency - it will
+      raise ModuleNotFoundError on a machine without librosa even though the
+      script never needs it.
+  (b) No `device=` argument to pipeline -> CPU inference for a 95 M-param
+      model, ~1-3 s per 3 s block; if you have CUDA, pass device=0.
+  (c) `sd.rec(...)` with no `device=` uses the OS default input. On a laptop
+      with a webcam mic that is often the wrong device and the level gate
+      trips ("Very quiet audio") forever. Add a device picker / env var:
+          DEVICE = os.environ.get("SEMO_MIC")   # index or name from query_devices
+          sd.rec(..., device=DEVICE)
+  (d) Peak gate `np.max(np.abs(audio)) < 0.01` is fragile. Use RMS and
+      normalise before inference:
+          rms = float(np.sqrt(np.mean(audio**2)))
+          if rms < 0.005: continue
+          audio = audio / max(np.max(np.abs(audio)), 1e-6)
+      Note that normalising changes predictions; decide once and document it.
+  (e) No stream cleanup on Ctrl+C. `sd.wait()` can be interrupted leaving the
+      stream open; use a context manager + try/finally, or an InputStream with
+      a callback and a queue so Ctrl+C is handled between blocks.
+  (f) No latency instrumentation although README lists latency as open work.
+      Print `t_capture`, `t_infer`, `t_total` per block.
+  (g) Nothing prevents the model from being called with a buffer shorter than
+      expected; wav2vec2 needs >= 400 samples, 3 s is fine, but guard anyway.
+
+M-4..M-5  tes_audio.py
+  (a) The name is a typo for `test_audio.py` (and it is a tool, not a test, so
+      `predict_file.py` would be better; pytest will not collect it, which is
+      lucky).
+  (b) Path from input() often arrives as " '/content/a b.wav' " (Windows drag &
+      drop quotes it, and spaces survive). Fix:
+          raw = input("Audio file: ").strip().strip("'\"").replace("\\ ", " ")
+          path = Path(os.path.expanduser(raw))
+          if not path.is_file(): sys.exit(f"Not found: {path}")
+      Also reject directories and non-audio extensions explicitly.
+  (c) No try/except around librosa.load -> ugly traceback for a bad path.
+  (d) top_k=7 for an 8-label model: one class is always hidden. Use top_k=None
+      (all labels) or 8.
+  (e) Long files are truncated by the pipeline silently; print the duration and
+      the effective window so the user knows only ~6 s were used:
+          print(f"duration {len(audio)/sr:.2f}s (model uses <= {MAX_S:.1f}s)")
+  (f) mp3/m4a need libsndfile >= 1.1 or ffmpeg; document that WAV is preferred.
+
+M-6  np.savez with object arrays
+--------------------------------------------------------------------------
+Cell 85:
+    np.savez(batch_path,
+             input_values=np.array(features_list, dtype=object),
+             labels=np.asarray(labels_list, dtype=np.int64))
+  * object arrays force `np.load(..., allow_pickle=True)` everywhere (a known
+    code-execution vector for untrusted files) and break some numpy versions.
+  * np.savez is not compressed; 11k x 96k floats = ~4.3 GB on Drive.
+Better:
+    lengths = np.array([len(x) for x in feats], dtype=np.int32)
+    flat    = np.concatenate(feats).astype(np.float32)
+    np.savez_compressed(path, data=flat, lengths=lengths, labels=labels)
+  * ~2x smaller, no pickle, portable.
+  * or store float16 to halve again (input_values are ~[-1,1]).
+
+M-7  Hard-coded CREMA-D path inconsistent with discovery
+--------------------------------------------------------------------------
+Cell 65 walks the tree to find AudioWAV and assigns `crema_dir`, but cell 66
+hard-codes /content/crema_extract/CREMA-D-master/AudioWAV. If the archive's
+top folder is named differently (branch name change, .zip re-pack), the next
+cells fail with FileNotFoundError while cell 65 printed success.
+Fix: persist configurations, not strings:
+    json.dump({"crema": str(crema_dir), "tess": ..., "ravdess": ...},
+              open(CFG, "w"))
+and load that everywhere (also fixes restarts).
+
+M-8  Unescaped URL (recorded traceback)
+--------------------------------------------------------------------------
+Cell 46:
+    urllib.request.urlretrieve(
+      "https://tessdata.s3.amazonaws.com/TESS Toronto emotional speech set data.zip", ...)
+=> InvalidURL: URL can't contain control characters ... (found at least ' ')
+Fix: urllib.parse.quote(url, safe=":/") or use the percent-encoded URL
+(cell 47 did this but the host then returned HTTP 403 Forbidden - the bucket
+no longer serves the file). Use the Borealis DOI download used in cell 19/65.
+
+M-9  tarfile filter= requires Python >= 3.12
+--------------------------------------------------------------------------
+Cell 73: tar.extractall(extract_dir, filter="data")
+  * On Python 3.10/3.11 -> TypeError: extractall() got an unexpected keyword
+    argument 'filter'.
+  * Keeping the filter is the right thing security-wise; just guard it:
+        kw = {"filter": "data"} if sys.version_info >= (3, 11, 4) else {}
+        tar.extractall(extract_dir, **kw)
+
+M-10  Dead code in cell 76
+--------------------------------------------------------------------------
+`get_speaker_id(row)` is defined and never used, and returns None for TESS
+(no else branch), so if it were used it would silently create a single giant
+"None" speaker group. Delete it or complete it and assert no None remains.
+
+M-11  ModuleNotFoundError inside the notebook (recorded)
+--------------------------------------------------------------------------
+Cell 89: `import sounddevice as sd` -> ModuleNotFoundError in Colab. Colab has
+no audio input device, so even with pip install it cannot record. Replace the
+cell with a file-upload widget:
+    from google.colab import files
+    up = files.upload(); path = next(iter(up))
+    audio, sr = sf.read(path)
+    # feed the same feature extractor as training, then argmax the logits
+
+L-1  No LICENSE, no CI, no tests, no packaging
+     Add LICENSE (datasets differ: CREMA-D is research-use, RAVDESS CC BY-NC-SA,
+     TESS research-only - check before publishing weights), a pytest suite with
+     2-3 golden-file tests, and a GitHub Actions job that runs
+     `python -m py_compile` + unit tests on a synthetic WAV.
+
+L-2  The notebook commits 1.1 MB of outputs including a 380 MB download
+     progress bar and stale tracebacks. Clear outputs before committing
+     (nbstripout) so reviewers do not mistake recorded errors for current state.
+
+L-3  Documentation drift
+     * README "requirements.txt ... will be provided" - it exists.
+     * README "Model checkpoint setup instructions will be documented
+       separately" - no such document.
+     * notebooks/README says "training notebook ... should be added here as
+       they are prepared" - it is already committed.
+     * README says 3 epochs, 64.78%; final_model's training_args says 5 epochs
+       (cell 36) - that is a different experiment; clarify which is the
+       headline model.
+     * "11,278 samples" = 7,439 + 1,439 + 2,400, but canonical counts are
+       7,442 (CREMA-D) and 1,440 (RAVDESS). The 3 + 1 missing files come from
+       content-hash dedupe; document that, or you have unexplained loss.
+
+L-4  Dead imports/deps
+     live_emotion.py imports librosa but never uses it; scipy and matplotlib are
+     in requirements.txt but imported nowhere.
+
+L-5  Misleading comment
+     live_emotion.py:36 "Convert stereo-shaped array to a 1D array" - the
+     recording is mono (channels=1), shape (n,1). Say "flatten (n,1) -> (n,)".
+
+L-6  Notebook structure
+     Cells 49, 53, 58, 66, 75, 80, 83, 85 each rebuild a full dataframe index
+     with slightly different rules (some include "ps", some do not; some filter
+     RAVDESS modality "03", some do not; some dedupe by filename, some by
+     sha256). Nine near-duplicates with subtly different semantics is the root
+     cause of C-1/C-7-style inconsistencies. Keep exactly one
+     build_index() function and delete the rest (or move them to an
+     `archive/` notebook).
+
+--------------------------------------------------------------------------------
+7. ENVIRONMENT AND DEPENDENCY DEBUGGING
+--------------------------------------------------------------------------------
+Recommended baseline (pure pip, CPU first):
+    python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
+    python -m pip install -U pip wheel
+    pip install torch --index-url https://download.pytorch.org/whl/cpu
+    pip install "transformers>=4.41,<5" "datasets<3.6" \
+                "librosa>=0.10.1,<0.11" "numpy<2" soundfile sounddevice \
+                scikit-learn tqdm huggingface_hub ipython
+    sudo apt-get install -y libportaudio2 ffmpeg                # Linux only
+
+Diagnostics to run before blaming the code:
+    python --version                     # 3.9+ for removesuffix; >=3.12 for tarfile filter
+    python -c "import sys; print(sys.executable)"
+    pip check                            # conflicting requirements
+    pip list | grep -Ei "torch|transformers|datasets|numpy|librosa|soundfile"
+    python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+    python -c "import soundfile as sf; print(sf.__version__, sf.__libsndfile_version__)"
+    python -c "import librosa; print(librosa.__version__)"
+    python -c "import numpy; print(numpy.__version__)"
+    python -c "import sounddevice as sd; print(sd.__version__)"
+
+Known failure signatures:
+  "A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x"
+      -> pip install "numpy<2" and reinstall librosa/numba wheels.
+  "No module named 'numba'" / numba ImportError inside librosa
+      -> pip install "numba>=0.58" matching your numpy; or use soundfile +
+         scipy.signal.resample_poly instead of librosa.resample.
+  "undefined symbol: ..." on import torch
+      -> torch/CUDA mismatch; reinstall torch from the matching wheel index.
+  "PortAudio library not found"           -> see H-2.
+  CUDA OOM at 4 GB                     -> see section 12.
+  "TypeError: extractall() got an unexpected keyword argument 'filter'"
+                                          -> see M-9.
+  "HTTPSConnectionPool ... 401/403" from HF
+      -> huggingface-cli login or export HF_TOKEN=hf_xxx.
+
+Offline / proxied environments:
+    export HF_HOME=./.hf_cache
+    export TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1
+    # pre-seed with: huggingface-cli download facebook/wav2vec2-base --local-dir .hf_cache/base
+
+--------------------------------------------------------------------------------
+8. MICROPHONE / AUDIO I/O DEBUGGING
+--------------------------------------------------------------------------------
+Step 1 - does PortAudio see devices?
+    python -c "import sounddevice as sd; print(sd.query_devices())"
+    python -c "import sounddevice as sd; print(sd.default.device, sd.default.samplerate)"
+Step 2 - is the default input index actually a mic?
+    Look for "> 0 ... input channels >= 1" in the query_devices table. On many
+    Linux boxes index 0 is "pulse"/"default" and index 1 is HDMI (no input).
+    Explicitly: python test_microphone.py after setting
+        sd.default.device = (mic_index, None)
+Step 3 - does 16 kHz mono float32 work?
+    python - <<'PY'
+    import sounddevice as sd, numpy as np
+    sd.check_input_settings(device=None, channels=1, samplerate=16000,
+                            dtype="float32")
+    a = sd.rec(16000, samplerate=16000, channels=1, dtype="float32",
+               device=None); sd.wait()
+    print(a.shape, float(np.abs(a).max()), float(np.sqrt((a**2).mean())))
+    PY
+    Expected: (16000, 1), peak typically 0.01-0.9. Peak 0.0 = muted/wrong device.
+Step 4 - "Very quiet audio" forever
+    * OS input level at 0, or the OS is using a different device than
+      PortAudio, or the mic is muted by a hardware switch.
+    * PipeWire/PulseAudio: pactl list short sources; arecord -d 3 -f S16_LE -r 16000 /tmp/t.wav
+    * WSL2 / Docker / Colab / CI: there is no audio device. Record elsewhere and
+      use tes_audio.py.
+Step 5 - clipping and DC offset
+    If peak == 1.0, the signal is clipped; lower the OS gain. A large DC offset
+    (peak high but RMS low) distorts normalisation: subtract the mean first.
+Step 6 - sample rate mismatch
+    Model expects 16 kHz. sd.rec(samplerate=16000) asks the OS to resample; on
+    some devices this fails or silently runs at 48 kHz. Force with
+    sd.check_input_settings first, and confirm with a known-tone test
+    (play 440 Hz, FFT peak should land at 440).
+
+--------------------------------------------------------------------------------
+9. MODEL DOWNLOAD / HUGGINGFACE DEBUGGING
+--------------------------------------------------------------------------------
+Symptoms and checks:
+  1. OSError: We couldn't connect to 'https://huggingface.co'
+     -> no internet, proxy, or HF blocked. Test: curl -I https://huggingface.co
+  2. 401/403, "Repository not found", or gated model
+     -> export HF_TOKEN=hf_... ; huggingface-cli whoami
+  3. "You are sending unauthenticated requests to the HF Hub" (appears twice in
+     the committed notebook) -> harmless warning, but set HF_TOKEN for speed
+     and rate limits.
+  4. Download stalls / truncated safetensors
+     -> rm -rf ~/.cache/huggingface/hub/models--facebook--wav2vec2-base and
+        re-download; check sizes (base is about 380 MB).
+  5. from_pretrained(local_dir) -> "Incorrect path_or_model_id"
+     -> the dir lacks config.json, or you passed a file, or a trailing space in
+        the copied path. Print os.listdir(dir).
+  6. "Some weights ... were not initialized" / LOAD REPORT with MISSING
+     projector/classifier
+     -> EXPECTED when attaching a fresh 8-class head. UNEXPECTED keys
+        (quantizer.*, project_hid.*) are also expected: the pretraining head is
+        dropped. This is benign - but note that cell 95 built the "Original
+        pretrained" baseline exactly this way, i.e. a random head scoring
+        11.58% (chance for 8 classes is 12.5%), which is not a baseline of the
+        original emotion model. Delete or relabel that row.
+  7. Version mismatch when loading a checkpoint saved by a newer transformers
+     -> pin transformers in both training and inference environments; JSON
+        configs are forward-compatible but the state-dict layout may not be.
+Verify a checkpoint without any repo code:
+    python - <<'PY'
+    from transformers import AutoModelForAudioClassification, AutoFeatureExtractor
+    d = "./checkpoints/combined_model_v1/epoch_2"
+    m = AutoModelForAudioClassification.from_pretrained(d)
+    f = AutoFeatureExtractor.from_pretrained(d)
+    print(m.config.num_labels, m.config.id2label, f.sampling_rate)
+    assert f.sampling_rate == 16000
+    assert m.config.num_labels == 8
+    PY
+
+--------------------------------------------------------------------------------
+10. NOTEBOOK (COLAB) DEBUGGING AND CORRECT RUN ORDER
+--------------------------------------------------------------------------------
+The committed notebook is a research log, not a pipeline: 107 cells, many
+superseded. Running "Restart and run all" will FAIL (see B-4, M-8, M-11).
+
+Minimal viable path that produced the final reported numbers:
+    cell 6/44/62   mount Drive (repeated; keep one)
+    cell 73        download CREMA-D from the HF dataset mirror (real audio)
+    cell 19/47/65  obtain TESS (Borealis DOI zip) and RAVDESS zip
+    cell 84        verify all three folders exist and are non-empty
+    cell 85        build index + write npz batches  <-- the authoritative one
+    cell 86        train 3 epochs, save epoch_1..3 + best
+    cell 88        evaluate on processed_batches/test
+    cell 92        compare all checkpoints -> tess_model_comparison.csv
+    cell 106       sanity-check that epoch_2 loads with 8 labels @16 kHz
+Everything else is an abandoned iteration (notably 38-71, 75-83), but note that
+75-83 are the ones whose label maps dropped "ps" (C-1) - do not resurrect them
+without the fix.
+
+Colab-specific traps observed:
+  * Drive re-mounts in the middle of the notebook (cells 6/44/62/82/84) - after
+    a runtime restart you must re-run all data cells, and stale variables are
+    the source of the recorded NameErrors.
+  * Drive I/O for 11k files + 4 GB of checkpoints is slow; "Runtime
+    disconnected" mid-epoch leaves partial npz batches (see H-5).
+  * Colab's datasets version moves fast: the torchcodec path (H-3) appeared
+    without any code change here.
+  * No microphone exists in Colab: cell 89 can never work (M-11).
+  * `!pip install -q ...` in cell 60 does not pin anything, so two runs a month
+    apart are different environments; record `pip freeze` output at the top of
+    every run.
+Debugging checklist inside the notebook:
+    !df -h /content            # disk space before downloading datasets
+    !nvidia-smi                # GPU present + memory
+    import sys; print(sys.version)
+    !pip freeze > /content/drive/MyDrive/SpeechEmotionProject/pip_freeze.txt
+    # after any data step:
+    print(len(df), df["dataset"].value_counts().to_dict())
+    assert df["emotion"].nunique() == 8, df["emotion"].value_counts()
+
+--------------------------------------------------------------------------------
+11. DATASET ACQUISITION DEBUGGING
+--------------------------------------------------------------------------------
+CREMA-D (7,442 canonical WAVs, 91 actors, 6 emotions)
+  * GitHub source archive -> LFS pointers (H-4). Detect:
+        head -c 60 <file>.wav     -> "version https://git-lfs.github.com/spec/v1"
+        ls -l | awk '$5 < 1000'   -> many tiny files
+  * git clone the LFS mirror (needs git-lfs, ~3.4 GB) or use the HF mirror.
+  * Filename grammar: `1001_DFA_ANG_XX.wav` = actor_sentence_emotion_level.
+    parts[2] in {ANG,DIS,FEA,HAP,NEU,SAD}. Anything else is a parse failure -
+    count and print them.
+RAVDESS (1,440 unique files, 24 actors)
+  * The committed zip contains 2,880 entries: every filename appears TWICE
+    (cell 32). Deduplicate by filename AND by content hash; the notebook does
+    both in different cells, which is why counts differ (1,440 vs 1,439).
+  * Filename grammar: `03-01-05-01-01-01-07.wav` =
+    modality-vocalchannel-emotion-intensity-statement-repetition-actor.
+    Emotion is field index 2 in the notebook's split, which is correct ONLY if
+    you do not strip the leading "03-". Cell 53 uses parts[0]=="03" as the
+    modality filter and parts[2] as emotion - consistent. Cell 50/51 use
+    parts[1]/parts[2] for modality/channel, which is off by one relative to the
+    documented grammar; verify against the RAVDESS spec before trusting those
+    tables.
+  * `._*` AppleDouble files appear when zipping on macOS: filter
+    name.startswith("._") (cells 26-27 do this; later cells do not).
+TESS (2,800 files, 2 actresses)
+  * Filenames: `OAF_back_angry.wav`, i.e. speaker_word_emotion, emotion in
+    {angry, disgust, fear, happy, neutral, ps, sad}. "ps" = pleasant surprise.
+    Forgetting "ps" costs you 400 files and an entire class (C-1).
+  * Downloads: the S3 URL is 403 (M-8); use the Borealis DOI
+    doi:10.5683/SP2/E8H2MF and check the response starts with "PK".
+  * 213 MB zip -> verify 2,801 entries / 2,800 .wav after extraction.
+SAVEE (480 files, 4 speakers)
+  * Excluded because the download page was down. Its label set includes
+    "surprise" and no calm - if you add it later, extend the same mapping table
+    and re-run the checks in C-1.
+General guards for any dataset step:
+    * print per-dataset AND per-emotion counts after indexing
+    * assert every label is in the 8-class set
+    * assert 0 duplicate paths, 0 duplicate hashes across splits
+    * assert train/val/test speaker sets are disjoint
+    * record total duration (a file present but 0.1 s long is still useless)
+    * spot-listen to 3 files per dataset, or plot a waveform + spectrogram
+
+--------------------------------------------------------------------------------
+12. TRAINING DEBUGGING
+--------------------------------------------------------------------------------
+CUDA OOM ("CUDA out of memory") with the notebook's settings
+    batch 2 x up to 96,000 samples is already ~380 MB of weights + activations
+    on a T4 (15 GB). If it OOMs: batch_size 1, keep ACCUMULATION_STEPS 4-8,
+    add torch.cuda.empty_cache() between epochs (present), or truncate to
+    MAX_SECONDS=4 (wav2vec2-base is fine with 4 s; TESS clips are ~2-3 s).
+Loss NaN / inf
+    * fp16 without GradScaler -> add it (H-6).
+    * A single corrupt/1-sample file can blow up the loss; filter len < 0.2 s.
+    * Clip gradients (present, 1.0) and log the pre-clip norm.
+Loss not decreasing
+    * LR too high for a re-initialised head (1e-5 with no warmup is borderline).
+    * Verify the labels actually align with the audio:
+        pick 5 files, listen, print the label. A mis-parsed field in the
+        filename turns training into noise-fitting, which still yields ~30-35%
+        accuracy on 6 classes and looks plausible - exactly the observed floor.
+    * Verify padding/masking: features were padded with extractor.pad; check
+      the attention_mask sums equal the true lengths.
+    * Verify the head: model.config.num_labels == 8 and id2label matches the
+      training label2id list order (a permuted id2label silently destroys F1).
+Slow training
+    * num_workers=0 (correct for a single-file-cached npz dataset, but it means
+      Drive reads block the GPU).
+    * Copy processed_batches to /content/local first (10-50x faster), keep only
+      checkpoints on Drive.
+    * batch_size 2 -> 8 once memory allows; validation with batch 2 over 1,769
+      samples is 885 forward passes per epoch.
+    * Consider `torch.backends.cudnn.benchmark = True` for fixed shapes.
+Determinism
+    * random/np/torch seeds set once (good) but no `torch.use_deterministic_algorithms`,
+      no worker seeding (num_workers=0, so OK), no `np.random.default_rng`.
+    * Record the exact split (index.csv) - without it the 52.54% is not
+      reproducible (it is not committed, see B-2).
+Resume after a Colab disconnect
+    * Only weights are saved per epoch; the optimizer/SAMPLES order restart from
+      scratch. To resume properly you need the saved training_state.pt (which
+      the notebook writes but never loads) plus the sampler epoch.
+    * See H-5 about stale batch caches.
+Sanity baselines you should always print before claiming a win
+    1. Majority class: neutral is 1,583/11,278 -> ~14% overall.
+    2. Uniform random over 8 classes: 12.5%.
+    3. Random over the 6 classes present in the test set: 16.7%.
+    The "previous" checkpoints sit at 34% - better than chance but far from the
+    claimed capability; state that explicitly.
+
+--------------------------------------------------------------------------------
+13. EVALUATION DEBUGGING
+--------------------------------------------------------------------------------
+Trap 1 - weighted vs macro F1 (see C-2)
+    weighted F1 ignores classes with zero support; macro F1 exposes them.
+    Always print both, plus a confusion matrix. The committed report shows
+    disgust recall 0.99 with precision 0.41 (the model over-predicts disgust)
+    and fearful recall 0.16 (it almost never predicts fear). A single accuracy
+    number hides both pathologies.
+Trap 2 - checking class coverage
+    from collections import Counter
+    print(Counter(y_true))   # must equal Counter(y_pred keys) coverage
+Trap 3 - test set used for selection (C-3). Report the epoch curve and label
+    the chosen checkpoint's score as "selected on", not "test".
+Trap 4 - contamination (C-5). TESS is in Dpngtm's training data.
+Trap 5 - filtering by prediction (C-4). Never drop samples after scoring.
+Trap 6 - threshold/aggregation drift. `results[0]` from the pipeline is the
+    argmax, but the pipeline returns all labels; if you ever compare
+    "confidence > x" rules, the calibration differs per model.
+Trap 7 - mixed sample rates / lengths. Test files were resampled to 16 kHz in
+    preprocessing (good); if you evaluate a raw file through librosa in one path
+    and through the npz cache in another, you are not measuring the same thing.
+Reproducing the comparison table safely
+    * Hash every model dir: sha256sum */model.safetensors -> dedupe (C-7).
+    * Evaluate all models with ONE loop, ONE test loader, ONE label list
+      (cell 92 does this correctly, cell 95 does not).
+    * Store per-sample predictions to a CSV so metrics can be recomputed
+      without re-running inference:
+        pd.DataFrame({"y_true": y_true, "y_pred": y_pred}).to_csv(...)
+
+--------------------------------------------------------------------------------
+14. ERROR -> CAUSE -> FIX LOOKUP
+--------------------------------------------------------------------------------
+Error message (verbatim fragments)                      Cause / Fix
+------------------------------------------------------  ----------------------
+NameError: name 'train_df' is not defined               out-of-order cell exec /
+                                                        runtime reset -> B-4
+NameError: name 'train_dataset' is not defined          same -> B-4
+ModuleNotFoundError: No module named 'sounddevice'      Colab has no PortAudio /
+                                                        not installed -> H-2,M-11
+OSError: PortAudio library not found                    install libportaudio2 -> H-2
+sounddevice.PortAudioError: Error querying device -1    no default input -> section 8
+InvalidURL: URL can't contain control characters        unescaped space in URL -> M-8
+HTTPError: HTTP Error 403: Forbidden                    TESS S3 bucket retired ->
+                                                        use Borealis DOI -> M-8
+RuntimeError: SingleStreamDecoder ... Invalid data      LFS pointer / torchcodec /
+found when processing input                             missing ffmpeg -> H-3,H-4
+TypeError: extractall() got an unexpected keyword       Python < 3.12 -> M-9
+argument 'filter'
+ValueError: could not broadcast input array ...         variable-length arrays in
+                                                        a padded batch -> collate bug
+UnpicklingError / "allow_pickle"                        np.savez(object array) -> M-6
+FileNotFoundError: /content/CREMA-D/AudioWAV            dataset not downloaded /
+                                                        path changed -> M-7,H-4
+FileNotFoundError: /content/drive/MyDrive/...           Drive not mounted or not
+                                                        shared -> B-3
+OSError: Incorrect path_or_model_id                     checkpoint missing ->
+                                                        B-2
+ModuleNotFoundError: No module named 'google'           running Colab code off
+                                                        Colab -> B-3
+A module compiled using NumPy 1.x cannot run in 2.x     numpy 2 vs old wheels -> H-1
+CUDA out of memory                                      batch/seq too big -> s.12
+loss=nan / val loss exploding                           fp16 w/o scaler, no
+                                                        warmup -> H-6
+Accuracy ~12-16%                                        random guessing; labels
+                                                        misaligned or head not
+                                                        trained -> s.12
+Accuracy 99%+ on TESS                                   train/test contamination
+                                                        -> C-5
+Weighted F1 high but macro F1 ~0.36                     absent classes -> C-2
+"Very quiet audio. Please speak a little louder."        wrong input device /
+                                                        gain 0 / peak gate -> M-1
+Drastic accuracy change after a re-run                  stale npz batches or a
+                                                        changed split -> H-5
+
+--------------------------------------------------------------------------------
+15. VERIFICATION CHECKLIST (SMOKE TESTS)
+--------------------------------------------------------------------------------
+Run these in order; each must pass before the next.
+  [ ] 1  python -c "import torch, transformers, librosa, soundfile, sounddevice, sklearn; print('deps ok')"
+  [ ] 2  python -c "import sounddevice as sd; d=sd.query_devices(); print(d)"
+  [ ] 3  python test_microphone.py        -> peak > 0.01 when speaking
+  [ ] 4  python test_model.py             -> prints 8 labels
+  [ ] 5  python tes_audio.py              -> prints 8 probabilities summing to 1
+  [ ] 6  python live_emotion.py           -> one line per 3 s with a label
+  [ ] 7  checkpoint loads: num_labels==8, id2label in the expected order,
+         feature extractor sampling_rate==16000
+  [ ] 8  index.csv exists; per-dataset counts match the canonical numbers
+         (CREMA-D 7,439; RAVDESS 1,439; TESS 2,400) and every one of the 8
+         labels is present, OR the counts are explained in the README
+  [ ] 9  every file in the index opens with soundfile (assert >= 99%)
+  [ ] 10 train/val/test speaker sets are pairwise disjoint
+  [ ] 11 raw WAV header check: every file starts with RIFF/WAVE
+  [ ] 12 evaluation prints: n_total, n_scored, coverage, accuracy, macro F1,
+         weighted F1, per-class table, confusion matrix
+  [ ] 13 every number in README.md can be regenerated by one documented
+         command (today: no)
+
+--------------------------------------------------------------------------------
+16. READY-TO-APPLY PATCH SNIPPETS
+--------------------------------------------------------------------------------
+(a) Correct, strict TESS matcher (fixes C-1):
+    TESS_MAP = {"angry":"angry","disgust":"disgust","fear":"fearful",
+                "happy":"happy","neutral":"neutral","sad":"sad",
+                "ps":"surprised"}
+    def tess_label(stem: str) -> str:
+        code = stem.rsplit("_", 1)[-1].lower()
+        if code not in TESS_MAP:
+            raise ValueError(f"unmapped TESS label {code!r} in {stem!r}")
+        return TESS_MAP[code]
+
+(b) Sub-1%-loss guard for any dataset index (fixes C-6, H-9):
+    before = len(records)
+    valid  = [r for r in records if is_readable_wav(r["path"])]
+    dropped = before - len(valid)
+    print(f"index: kept {len(valid)}/{before} (dropped {dropped})")
+    if dropped > 0.01 * before:
+        raise RuntimeError(f"{dropped} unreadable files - refusing to train")
+
+(c) Non-pickled, compressed batch format (fixes M-6):
+    def save_batch(path, feats, labels):
+        lengths = np.asarray([len(f) for f in feats], dtype=np.int32)
+        flat    = np.concatenate(feats).astype(np.float16)
+        tmp = str(path) + ".tmp.npz"
+        np.savez_compressed(tmp, data=flat, lengths=lengths,
+                            labels=np.asarray(labels, dtype=np.int64))
+        os.replace(tmp, path)
+    def load_batch(path):
+        with np.load(path) as z:                 # no allow_pickle needed
+            data, lengths = z["data"], z["lengths"]
+            off = np.concatenate([[0], np.cumsum(lengths)])
+            return [data[off[i]:off[i+1]].astype(np.float32)
+                    for i in range(len(lengths))], z["labels"]
+
+(d) Cache invalidation by split fingerprint (fixes H-5):
+    fp = hashlib.sha256("\n".join(sorted(df["path"])).encode()).hexdigest()[:12]
+    split_dir = Path(save_root) / f"{split_name}-{fp}"
+
+(e) Honest metric block (fixes C-2, C-4):
+    print(f"samples: {len(y_true)}  coverage: {len(set(y_pred))}/{n_classes}")
+    print(f"accuracy: {accuracy_score(y_true, y_pred):.4f}")
+    print(f"macro F1: {f1_score(y_true, y_pred, average='macro'):.4f}")
+    print(f"weighted F1: {f1_score(y_true, y_pred, average='weighted'):.4f}")
+    print(classification_report(y_true, y_pred, labels=ALL_LABELS,
+                                target_names=ALL_LABELS, zero_division=0))
+    print(confusion_matrix(y_true, y_pred, labels=ALL_LABELS))
+
+(f) Live loop with device selection, RMS gate and clean shutdown (M-1..M-3):
+    import os, queue, time, numpy as np, sounddevice as sd, torch
+    from transformers import pipeline
+    MODEL = os.environ.get("SEMO_MODEL",
+                           "Dpngtm/wav2vec2-emotion-recognition")
+    MIC   = os.environ.get("SEMO_MIC")           # index or name, or None
+    SR, BLOCK = 16000, 3
+    clf = pipeline("audio-classification", model=MODEL,
+                   device=0 if torch.cuda.is_available() else -1)
+    q = queue.Queue()
+    def cb(indata, frames, t, status):
+        if status: print(status, flush=True)
+        q.put(indata.copy())
+    with sd.InputStream(samplerate=SR, channels=1, dtype="float32",
+                        blocksize=SR // 4, device=MIC, callback=cb):
+        buf = np.zeros(0, dtype=np.float32)
+        while True:
+            buf = np.concatenate([buf, q.get().ravel()])[-SR * BLOCK:]
+            if len(buf) < SR * BLOCK:
+                continue
+            rms = float(np.sqrt((buf ** 2).mean()))
+            if rms < 0.005:
+                continue
+            x = buf / max(float(np.abs(buf).max()), 1e-6)
+            t0 = time.perf_counter()
+            out = clf({"raw": x, "sampling_rate": SR}, top_k=3)
+            dt = time.perf_counter() - t0
+            print(" | ".join(f"{r['label']} {r['score']*100:.1f}%"
+                             for r in out) + f"   [{dt*1000:.0f} ms]",
+                  flush=True)
+
+(g) Minimal requirements pin (fixes H-1) - see section 7 for the install line.
+
+--------------------------------------------------------------------------------
+17. EVIDENCE LOG (measured from the committed notebook outputs)
+--------------------------------------------------------------------------------
+These are the concrete numbers the analysis above is based on. They are
+reproducible only by re-running the Colab notebook with the author's Drive.
+
+Index / dataset
+  * cells 13-15: CREMA-D 7,442 WAVs (1,271 each for ANG/DIS/FEA/HAP/SAD,
+    1,087 NEU), 91 actors.
+  * cells 26-27, 32: RAVDESS zip has 2,880 entries; 1,440 unique filenames;
+    every filename appears exactly twice.
+  * cells 20-21: TESS 2,800 WAVs; 400 per emotion x 7 (including "ps").
+  * cell 71: old pipeline "train: skipped 5,972 unreadable" -> 1,139 train.
+  * cell 75/103: final index 11,278 = CREMA-D 7,439 + TESS 2,400 + RAVDESS
+    1,439. Emotion counts: disgust 1,863, angry 1,863, sad 1,862, fearful
+    1,862, happy 1,861, neutral 1,583, surprised 192, calm 192.
+  * cell 76: train 7,109 / val 1,769 / TESS 2,400; shared speakers 0.
+  * cell 85: 112 train, 28 validation, 38 test npz batch files (64 rows each).
+  * cell 104: train.csv {CREMA-D 5,970; RAVDESS 1,139},
+    validation.csv {CREMA-D 1,469; RAVDESS 300}, test.csv {TESS 2,400}.
+
+Training (cell 86, Tesla T4)
+  * epoch 1: train_loss 1.6267, val_acc 0.4997, val_wF1 0.4710
+  * epoch 2: train_loss 1.1361, val_acc 0.6292, val_wF1 0.6300
+  * epoch 3: train_loss 0.8475, val_acc 0.6478, val_wF1 0.6461
+  * batch 2, accumulation 4, lr 1e-5, 3 epochs, fp16 autocast, clip 1.0,
+    no scheduler, no GradScaler.
+
+Evaluation
+  * cell 88: 2,400 samples, accuracy 0.4813, weighted F1 0.4797,
+    macro avg F1 0.36; calm support 0, surprised support 0;
+    disgust P 0.41 / R 0.99 ; fearful P 1.00 / R 0.16 ;
+    neutral P 0.92 / R 0.23.
+  * cell 92: TESS accuracy by checkpoint 34.25 / 34.62 / 34.25 / 34.46 /
+    34.46 / 34.33 / 34.33 / 40.12 / 52.54 / 48.12 / 48.12.
+  * cell 95: "Original pretrained" (random head) 11.58%, combined epoch 2
+    52.54% -> the 11.58% row is a random-head sanity check, not a baseline.
+  * cell 98: Dpngtm on TESS = 99.88% with 400 samples skipped and no neutral
+    row -> contamination + prediction-based filtering.
+  * cell 36: final_model trained 5 epochs @1e-5; final_model_v2 3 epochs
+    @2e-6; the README's "3 epochs / 64.78%" refers to combined_model_v1 only.
+
+Recorded tracebacks in the notebook
+  * cell 42 NameError: train_df
+  * cell 46 InvalidURL: space in URL
+  * cell 47 HTTPError 403
+  * cell 69 RuntimeError (torchcodec) on CREMA-D from GitHub
+  * cell 71 silent loss of 5,972 + 1,470 files
+  * cell 78 NameError: train_dataset
+  * cell 81 NameError: train_df
+  * cell 89 ModuleNotFoundError: sounddevice
+
+--------------------------------------------------------------------------------
+18. OPEN QUESTIONS (cannot be resolved from the repository)
+--------------------------------------------------------------------------------
+  1. Which checkpoint is the documented "final" model? README implies epoch 3
+     of a 3-epoch run (64.78% val) but the published 52.54% TESS number comes
+     from epoch 2, and "best" (val-selected) is epoch 3 at 48.12% TESS.
+  2. Was dropping the 400 "ps" files intentional? Nothing in the notebook says
+     so; the earlier cells (59/66) did include them.
+  3. Does Dpngtm's label set contain "calm" and "surprised"? Its card merges
+     calm+neutral, which would make live_emotion.py's output taxonomy
+     incompatible with the 8-class local model. Verify with test_model.py.
+  4. Are the 3 CREMA-D and 1 RAVDESS "missing" files genuinely content
+     duplicates, or hash collisions on the LFS-mirror files? Log the dropped
+     paths.
+  5. Licensing: RAVDESS is CC BY-NC-SA, TESS is research-only, CREMA-D has its
+     own terms. Publishing weights trained on them (as B-2 recommends) may be
+     restricted - check before release.
+  6. Intended deployment target (laptop CPU, phone, edge?). README says
+     "on-device" and "real-time", but no latency or memory measurement exists,
+     and the demo model runs on CPU at 3-second granularity.
+
+================================================================================
+END OF FILE
+================================================================================
