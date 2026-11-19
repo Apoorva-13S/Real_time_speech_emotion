@@ -238,3 +238,14 @@ experiment_2/
 
 # Python and experiment outputs
 results/
+
+# --- speech emotion project ---
+runs/
+*.npz
+*.tmp.npz
+.hf_cache/
+data/splits/
+model.zip
+*.safetensors
+*.bin
+!configs/*.yaml

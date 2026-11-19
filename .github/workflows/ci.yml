@@ -1,0 +1,161 @@
+name: CI
+
+# Runs on every push and pull request. Fast by design (< ~3 min):
+# no dataset download, no model download, no GPU.
+#   lint        -> syntax + import check of every module
+#   unit-tests  -> pure numpy/soundfile tests, no network
+#   data-path   -> offline fixture -> split -> augment -> npz cache
+#   app         -> web server self-test (HTTP plumbing, no model)
+#   contract    -> asserts xbgoose/ravdess still matches our assumptions
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install lightweight dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Deliberately NOT torch/transformers: those are only needed for
+          # training, which CI does not do. This keeps the job under a minute.
+          pip install numpy soundfile pyyaml pytest
+
+      - name: Show environment
+        run: |
+          python --version
+          python -c "import numpy, soundfile; print('numpy', numpy.__version__); print('soundfile', soundfile.__version__)"
+
+      - name: Syntax check every module
+        run: |
+          python -m py_compile $(git ls-files '*.py')
+          echo "all python files compile"
+
+      - name: Unit tests (no network, no torch)
+        run: python tests/test_pipeline.py
+
+      - name: Pytest wrapper (same tests, for reports)
+        run: |
+          pip install pytest
+          pytest tests -q --tb=short || python tests/test_pipeline.py
+
+      - name: Data path on an offline fixture
+        run: |
+          python tests/make_offline_fixture.py --out /tmp/ravfix --actors 8 --reps 2
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "src")
+          from ser import config
+          from ser.prepare import prepare
+          cfg = config.load_yaml("configs/local_train.yaml")
+          cfg["data"].update(source="/tmp/ravfix", limit=None,
+                             splits_file="/tmp/run/data/splits.json")
+          cfg["run"]["output_dir"] = "/tmp/run"
+          cfg["augment"]["copies"] = 2
+          prep = prepare(cfg)
+          assert len(prep.y_train) > 0, "empty train split"
+          assert len(prep.y_val) > 0, "empty val split"
+          assert len(prep.y_test) > 0, "empty test split"
+          assert prep.synthetic_fraction > 0, "augmentation produced nothing"
+          # every class must be learnable and measurable on this fixture
+          for split in ("train", "val", "test"):
+              per = prep.split_info["splits"][split]["per_class"]
+              missing = [c for c, n in per.items() if n == 0]
+              assert not missing, f"{split} missing {missing}"
+          print("data path OK:", prep.summary())
+          PY
+
+      - name: Web app self-test (no model, no mic)
+        run: python app/server.py --self-test
+
+      - name: Upload prepared artefacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-artifacts-${{ matrix.python-version }}
+          path: |
+            /tmp/run/data/split_report.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  dataset-contract:
+    # Verifies the upstream dataset has not changed shape under us.
+    # Network-only, ~5 s, and non-blocking: a Hugging Face outage should not
+    # fail your build.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy soundfile
+      - name: Check xbgoose/ravdess contract
+        run: python tests/check_dataset_contract.py
+
+  train-smoke:
+    # Optional, manual only: proves the real torch training loop still runs.
+    # Excluded from push/PR because it downloads ~380 MB of model weights.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install training dependencies (CPU torch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install transformers datasets soundfile numpy pyyaml librosa
+      - name: Train on the offline fixture (2 actors' worth of data, 1 epoch)
+        env:
+          HF_HOME: ${{ github.workspace }}/.hf_cache
+        run: |
+          python tests/make_offline_fixture.py --out /tmp/ravfix --actors 6 --reps 2
+          python -m ser.train --config configs/ci_smoke.yaml \
+            --set data.source=/tmp/ravfix data.limit=null \
+                  run.output_dir=/tmp/smoke \
+                  data.splits_file=/tmp/smoke/data/splits.json \
+                  train.epochs=1 train.batch_size=2 data.window_s=2.0
+      - name: Evaluate the produced checkpoint
+        run: |
+          python -m ser.evaluate --model /tmp/smoke/best \
+            --config configs/ci_smoke.yaml \
+            --json /tmp/smoke/eval.json --min-macro-f1 0.0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smoke-run
+          path: |
+            /tmp/smoke/metrics.json
+            /tmp/smoke/eval.json
+            /tmp/smoke/data/split_report.json
+          if-no-files-found: warn
+          retention-days: 7

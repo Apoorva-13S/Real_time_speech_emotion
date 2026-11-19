@@ -1,0 +1,5 @@
+# Minimal set for CI: no torch, no transformers, no dataset download.
+numpy>=1.24,<2.3
+soundfile>=0.12,<0.15
+pyyaml>=6.0
+pytest>=7.4

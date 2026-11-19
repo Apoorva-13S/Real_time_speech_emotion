@@ -1,0 +1,40 @@
+# Laptop / small-GPU training. Full 1,440 clips, speaker-disjoint split.
+#   python -m ser.train --config configs/local_train.yaml
+# CPU: expect ~10-25 min/epoch. GPU: ~1-2 min/epoch.
+
+run:
+  seed: 42
+  device: auto
+  output_dir: runs/local
+  num_workers: 0
+
+data:
+  source: xbgoose/ravdess
+  limit: null               # null = all 1,440 rows
+  window_s: 4.0             # clips are 2.9-5.3 s; 4 s keeps most of the speech
+  val_frac: 0.17            # 24 actors -> 16 train / 4 val / 4 test
+  test_frac: 0.17
+  splits_file: runs/local/data/splits.json
+
+model:
+  name: facebook/wav2vec2-base
+  n_classes: 8              # set 7 + use labels.CLASSES_7 to merge calm/neutral
+  freeze_feature_extractor: true
+
+augment:
+  copies: 2                 # 0 = off. Rare classes automatically get more.
+  preset: full
+  scale: 0.9                # 0..1, scales every transform probability
+  bootstrap: 6
+
+train:
+  epochs: 3
+  batch_size: 4
+  grad_accum: 2             # effective batch 8
+  lr: 0.00003
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  class_weight_mode: sqrt   # none | sqrt | balanced
+  max_grad_norm: 1.0
+  fp16: true                # only used when a GPU is present
+  resume: false

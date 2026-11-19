@@ -1,0 +1,917 @@
+================================================================================
+SPEECH EMOTION RECOGNITION - COMPLETE PROCESS FROM ZERO TO LIVE DEMO
+================================================================================
+Dataset  : xbgoose/ravdess  (Hugging Face)
+Training : Google Colab, free tier
+Deploy   : GitHub Actions -> GitHub Releases -> live web demo
+
+Written for someone who has never trained a model. Every step says what to
+click or type, what you should see when it worked, and what to do when it
+does not. Section 12 is a symptom -> cause -> fix lookup table: start there if
+something breaks.
+
+Time budget for a first run (everything works first time):
+  accounts + repo setup        15 min
+  first training run in Colab  25 min  (of which ~15 min is actual compute)
+  verifying results            10 min
+  publishing the model         15 min
+  running the demo locally     10 min
+  ------------------------------------
+  about 1.25 hours, most of it waiting
+
+================================================================================
+CONTENTS
+================================================================================
+ 0. The one-minute summary
+ 1. What you need before you start
+ 2. Important: what this dataset actually contains  <- read this first
+ 3. Get the code onto your computer
+ 4. Run it on your own computer (no Colab, no GPU)
+ 5. Train for real in Google Colab
+ 6. Understand the results (how to tell a good run from a fake one)
+ 7. Publish the trained model
+ 8. Deploy: GitHub Actions
+ 9. Run the demo
+10. What CI does on every push
+11. Repo map: which file does what
+12. Troubleshooting: symptom -> cause -> fix
+13. If you are not technical: the absolute minimum path
+14. Glossary
+15. Honest limits of this project
+
+================================================================================
+0. THE ONE-MINUTE SUMMARY
+================================================================================
+Think of the whole project as a factory with three rooms:
+
+  ROOM 1 (Colab)     reads 1,440 audio clips, makes 4x copies of each with
+                     small distortions (noise, room echo, speed), teaches a
+                     neural network to recognise 8 emotions, and prints an
+                     honest scorecard. Output: a folder called `best/` that we
+                     zip into `model.zip`.
+
+  ROOM 2 (GitHub)    checks every change automatically (tests, data path, web
+                     server). When you publish a release, it stores model.zip
+                     so anyone can download it.
+
+  ROOM 3 (your PC or a server)  downloads model.zip, loads it, and gives you a
+                     web page: upload a clip -> get 8 emotion percentages.
+
+You only ever touch three commands:
+  python -m ser.train      (usually run in Colab)
+  python -m ser.evaluate   (check the result)
+  python app/server.py     (the demo)
+
+================================================================================
+1. WHAT YOU NEED BEFORE YOU START
+================================================================================
+Required
+  [ ] A Google account           (Colab + Drive, both free)
+  [ ] A GitHub account           (free)
+  [ ] Git installed              https://git-scm.com/downloads
+  [ ] Python 3.10 - 3.12         https://www.python.org/downloads/
+      Windows: during install, TICK "Add Python to PATH" - this is the single
+      most common setup mistake.
+  [ ] ~2 GB free disk            (code + model + Python packages)
+  [ ] Internet                   (first run downloads ~500 MB)
+
+Not required
+  x  A GPU. Colab lends you one for free.
+  x  A paid Hugging Face account. The dataset and base model are public.
+  x  A microphone. The demo accepts uploaded files; live mic is optional.
+  x  Any cloud server. The demo runs on your own machine.
+
+Optional
+  A microphone, if you want live detection (section 9, part C).
+
+Check your Python quickly - open a terminal (macOS/Linux) or PowerShell
+(Windows) and run:
+
+    python --version
+
+You want something like "Python 3.11.6". If you see "Python 2.7" or a message
+that python is not found, install it from python.org and reopen the terminal.
+
+================================================================================
+2. IMPORTANT: WHAT THIS DATASET ACTUALLY CONTAINS
+================================================================================
+Verified from the Hugging Face dataset server on 2026-11-19:
+
+  Name        xbgoose/ravdess
+  Rows        1,440
+  Splits      ONE split, named "train"      <-- see the note below
+  Columns     audio, modality, vocal_channel, emotion, emotional_intensity,
+              statement, repetition, actor (1-24), gender
+  Emotions    8 classes, already clean text labels:
+                neutral 96 | calm 192 | angry 192 | disgust 192
+                fearful 192 | happy 192 | sad 192 | surprised 192
+  Audio       all "audio-only" + "speech" (no singing, no video)
+              2.94 - 5.27 seconds per clip, 16 kHz mono is not guaranteed so we
+              resample
+  Actors      24 (12 female, 12 male)
+  Size        ~325 MB download, ~595 MB when unpacked
+
+THE MISCONCEPTION TO CLEAR UP FIRST
+  It is easy to read "8 splits" as "8 ready-made train/validation/test sets".
+  It is not. There are 8 EMOTIONS in ONE split. Nobody has divided the actors
+  for you.
+
+  That matters, and here is why, in plain terms:
+
+    Imagine teaching someone to recognise "angry" using the voice of Person A,
+    and then testing them on Person A again. They will score high by memorising
+    the person, not the emotion. To know if the model really learned "angry",
+    you must test it on voices it has never heard.
+
+  So this project splits the 24 actors, not the files:
+
+      16 actors -> training    (the model learns from these)
+       4 actors -> validation  (used to pick the best epoch; not reported)
+       4 actors -> test        (reported ONCE, at the end)
+
+  If you had split randomly by file instead, the same actor would appear in
+  training and testing, and the accuracy would look much better than the model
+  really is. This is the number one way speech projects fool themselves.
+
+WHY IT IS A GOOD CHOICE ANYWAY
+  * Clean string labels - no filename parsing, which is exactly where the old
+    version of this repo silently lost 400 files.
+  * Balanced: 192 clips per emotion (neutral 96, because RAVDESS has no
+    "strong" neutral).
+  * Small enough to train on a free GPU in minutes, big enough to be real.
+  * It is only 8 classes from 24 actors, so it is a demo-quality dataset, not a
+    production one. Section 15 is honest about this.
+
+================================================================================
+3. GET THE CODE ONTO YOUR COMPUTER
+================================================================================
+3.1  Open a terminal in a folder where you keep projects, then:
+
+    git clone https://github.com/Apoorva-13S/Real_time_speech_emotion.git
+    cd Real_time_speech_emotion
+
+  You should see a folder listing that includes:
+    app/         configs/     src/        tests/
+    process.txt  requirements.txt         instructions.txt
+
+  If git says "command not found", install Git (section 1) and reopen the
+  terminal.
+
+3.2  Create a private workspace for the Python packages. This keeps the
+     project's packages separate from the rest of your computer:
+
+    Windows (PowerShell)
+        python -m venv .venv
+        .venv\Scripts\Activate.ps1
+
+    macOS / Linux
+        python3 -m venv .venv
+        source .venv/bin/activate
+
+  Your prompt now starts with "(.venv)". If PowerShell refuses with
+  "running scripts is disabled", run this once:
+        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+  then try again.
+
+3.3  Install the project:
+
+    pip install -e ".[train]"
+
+  "-e" means "editable": the `ser` command always uses your current code.
+  This downloads about 500 MB (torch is the big one). Give it a few minutes.
+
+  You should end with:
+        Successfully installed ... ser-ravdess-1.0.0 ...
+
+3.4  Verify:
+
+    ser --help
+
+  Expected: a list of commands - prepare, train, evaluate, predict, audit,
+  export, serve. If you get "ser: command not found", your venv is not active
+  (repeat 3.2) or pip installed somewhere else (run `python -m ser --help`
+  instead).
+
+================================================================================
+4. RUN IT ON YOUR OWN COMPUTER (NO COLAB, NO GPU)
+================================================================================
+Do this first. It downloads 325 MB and takes a few minutes, but it proves your
+setup works before you trust a cloud machine with your time.
+
+4.1  Check the dataset matches expectations (about 1 minute after download):
+
+    ser audit --config configs/local_train.yaml
+
+  Expected output ends with "AUDIT OK" and shows 1440 clips, 24 actors, and 8
+  emotion counts (neutral 96, the rest 192). If counts differ, the dataset
+  changed upstream - see section 12, row "row count/actor count changed".
+
+4.2  Prepare the data without training (fast, and it validates everything):
+
+    ser prepare --config configs/local_train.yaml
+
+  Expected:
+      loaded 1440 clips  shape=(1440, 64000)  per_class=[192,192,...]
+      wrote split: runs/local/data/splits.json
+      augmented train: 3xxx clips (~65% synthetic) in ~60s
+      cached npz files under runs/local/data
+
+  Read the per-class numbers in the summary. If any class shows 0 in
+  "train", the model cannot learn it. If any shows 0 in "test", that emotion
+  is never measured.
+
+4.3  Train a tiny model on CPU, just to prove the loop works (5-10 minutes):
+
+    ser train --config configs/ci_smoke.yaml --set data.limit=null \
+        data.source=/tmp/nothing train.epochs=1
+
+  Simpler alternative that needs no dataset guesswork:
+
+    python tests/make_offline_fixture.py --out /tmp/ravfix --actors 6 --reps 2
+    ser train --config configs/ci_smoke.yaml --set \
+        data.source=/tmp/ravfix data.limit=null \
+        run.output_dir=/tmp/smoke \
+        data.splits_file=/tmp/smoke/data/splits.json \
+        data.window_s=2.0 train.epochs=1
+
+  This uses 96 synthetic beeps instead of real speech - it trains badly on
+  purpose. It is a plumbing test, not a model. Expected: an epoch line, then
+  a per-class report with numbers near 0.1 (random). That is correct.
+
+4.4  Real CPU training (optional, slow):
+
+    ser train --config configs/local_train.yaml
+
+  On a modern laptop this is roughly 15-40 minutes per epoch, 3 epochs. It
+  works, it is just not what CPU time is for. Section 5 does the same thing in
+  ~15 minutes total.
+
+================================================================================
+5. TRAIN FOR REAL IN GOOGLE COLAB
+================================================================================
+5.1  Open the notebook
+  * Go to https://colab.research.google.com
+  * File > Open notebook > GitHub tab
+  * Paste:  Apoorva-13S/Real_time_speech_emotion
+  * Choose  notebooks/colab_train.ipynb
+
+  If it asks for permission on a private repo, use a token, not a password
+  (GitHub > Settings > Developer settings > Personal access tokens > Fine
+  grained > Repository access: this repo > Contents: read).
+
+5.2  Turn on the free GPU
+  Runtime > Change runtime type > Hardware accelerator > T4 GPU > Save.
+  Free Colab gives you a T4 with 15 GB. That is plenty here.
+
+5.3  Run the cells in order
+  Click the play button on each cell, top to bottom. Do NOT use "Run all" the
+  first time: you want to read the checkpoint output of each cell.
+
+  Cell by cell, and what "good" looks like:
+
+  Step 1  prints python / torch versions and "cuda: True" and "gpu: Tesla T4".
+          If cuda is False, redo 5.2 (a different runtime was assigned).
+
+  Step 2  clones the repo. Ends with "working directory: /content/repo".
+
+  Step 3  installs dependencies and prints versions. If it stops on an
+          assertion about numpy, re-run the cell once - Colab sometimes
+          installs numpy 2 over an older librosa.
+
+  Step 4  mounts Google Drive (optional). It shows a permission page: sign in,
+          allow. If you skip this cell, set USE_DRIVE = False so checkpoints
+          stay on the Colab machine - you lose them on disconnect.
+
+  Step 5  downloads the dataset and prints:
+              clips   : 1440
+              actors  : 24
+              duration: min 2.94  median 3.67  max 5.27 s
+              angry 192 ... neutral 96 ...
+              DATASET OK
+          If this fails, stop. Nothing after it can be right.
+
+  Step 6  trains. You will see one line per 20 steps and one summary line per
+          epoch:
+              epoch 1/6: loss=1.62 val_acc=0.41 val_macroF1=0.36 val_wF1=0.40
+          Macro F1 should rise every epoch. Roughly 0.45-0.60 on this dataset
+          after 6 epochs is a normal, honest result. Takes ~15-20 minutes total.
+
+  Step 7  prints the test report. Read section 6 before believing it.
+
+  Step 8  upload a WAV and see predictions. Use a short clip of your own voice.
+
+  Step 9  builds /content/model.zip and downloads it to your computer.
+          Keep that file: it is your trained model.
+
+  Step 10 downloads run_record.json - the "recipe" for your result. Commit it
+          to the repo or keep it with your report. Without it, nobody (including
+          you, next month) can reproduce the number.
+
+5.4  If Colab disconnects mid-training
+  Free Colab disconnects after ~90 minutes idle, and sometimes for no reason.
+  Because configs/colab_train.yaml has `resume: true` and checkpoints go to
+  Drive every epoch:
+    - re-open the notebook, re-run Steps 1-5
+    - Step 6 will detect runs/full/checkpoints/last.pt and continue from the
+      next epoch. The printed line says "resumed from ... at epoch N".
+  If it starts from epoch 1, your Drive was not mounted - check Step 4 printed
+  "/content/drive/MyDrive/ser_runs/full".
+
+5.5  What the training actually does (plain language)
+  * Base model: facebook/wav2vec2-base. It already understands speech sounds
+    from 960 hours of audio. We teach it one new skill: 8 emotion categories.
+  * We freeze its "hearing" part and train only the small classifier on top.
+    With 1,152 training clips, that is the difference between learning and
+    memorising.
+  * Each training clip is copied 2-6 times with small distortions: quieter or
+    louder, room echo, telephone-quality filtering, +-8% faster or slower,
+    light background noise. Same emotion, different "recording". This teaches
+    the model to ignore the microphone and listen to the voice.
+  * `calm` and `surprised` are rare-ish and historically the classes models
+    fail at, so they automatically get more copies.
+  * Validation (4 unseen actors) picks the best epoch. Test (4 different
+    unseen actors) is used once, at the end, and never for choices.
+
+================================================================================
+6. UNDERSTAND THE RESULTS (HOW TO TELL A GOOD RUN FROM A FAKE ONE)
+================================================================================
+You will see a table like this. Here is what each column means:
+
+    class        prec   rec     f1  support
+    angry        0.82   0.79   0.80       46
+    calm         0.61   0.55   0.58       46
+    ...
+    accuracy          0.62
+    macro F1          0.58      <- average over all 8 classes, equally
+    weighted F1       0.61      <- average weighted by how many clips each has
+
+THREE NUMBERS, AND WHY ALL THREE
+
+  1. accuracy = "how often is the top guess right". Easy to inflate and easy to
+     misunderstand: if 30% of clips were one emotion, a lazy model that always
+     answers that emotion would score 30% while knowing nothing.
+
+  2. macro F1 = the average of the per-class F1 scores, each class counting
+     equally. THIS is the number to trust. If two classes are never predicted,
+     macro F1 drops immediately.
+
+  3. weighted F1 = like macro, but classes with more clips (and classes with
+     ZERO clips) count less or not at all. The previous version of this project
+     reported weighted F1 0.5267 while two of its eight classes had zero test
+     data - the reported number literally could not see the failure.
+
+  The project reports all three, and marks classes with no test data as
+  "NO TEST DATA" instead of quietly averaging them away.
+
+RED FLAGS - stop and fix before shipping
+  [ ] accuracy <= majority baseline (printed with the report). You have a model
+      that has learned nothing.
+  [ ] any class recall = 0.00. The model cannot recognise that emotion at all.
+      Usually caused by too few clips for it - check the per-class counts.
+  [ ] macro F1 much lower than weighted F1 (e.g. 0.35 vs 0.62). Some classes
+      are being sacrificed for the big ones.
+  [ ] validation score much higher than test score (e.g. 0.75 vs 0.45). The
+      model memorised the validation actors. Check that no actor appears in two
+      splits: `runs/*/data/split_report.json` has a "problems" list.
+  [ ] a suspiciously perfect score (95-100% on 8 emotions from 24 actors).
+      For this dataset that almost always means train/test leakage, or that
+      you evaluated on training data.
+
+WHAT IS A REALISTIC SCORE
+  Published results on acted corpora like RAVDESS are roughly 60-80% accuracy
+  with bigger models, more data, and 4-6 classes. With 8 classes, 16 actors
+  for training, and speaker-disjoint testing, expect:
+      accuracy   0.45 - 0.65
+      macro F1   0.40 - 0.60
+  Anything above 0.80 here deserves suspicion before celebration, and anything
+  below 0.35 means something is wrong (usually data, not the model).
+
+================================================================================
+7. PUBLISH THE TRAINED MODEL
+================================================================================
+A model is only useful if someone else can download it. Two free options.
+
+--- OPTION A: GitHub Release (simplest, recommended to start) ----------------
+
+  7A.1  You already have model.zip from Colab Step 9.
+        Unzip it somewhere to inspect - you should see a folder with:
+            config.json  model.safetensors  preprocessor_config.json
+            labels.json  metrics.json
+
+  7A.2  In your repo page on github.com:
+            Releases (right sidebar) > "Create a new release"
+            Choose a tag: v1.0.0        (or "Draft a new release" then type it)
+            Title: SER model v1.0.0
+            Description:
+                wav2vec2-base, 8 emotions, xbgoose/ravdess
+                test accuracy 0.xx | macro F1 0.xx
+                Trained on 16 actors, tested on 4 unseen actors
+            Attach model.zip to the "Attach binaries" box
+            Publish release
+
+  Files over 25 MB in a normal git commit are rejected; release assets allow
+  2 GB. That is exactly why the model goes here and not in the repo.
+
+  7A.3  The release URL you need later is:
+            https://github.com/<user>/Real_time_speech_emotion/releases/download/v1.0.0/model.zip
+
+--- OPTION B: Hugging Face Hub (if you want from_pretrained) ------------------
+
+    pip install huggingface_hub
+    huggingface-cli login                     # paste a WRITE token
+
+    python - <<'PY'
+    from huggingface_hub import HfApi
+    HfApi().upload_folder(
+        folder_path="best",                   # your unzipped checkpoint
+        repo_id="YOUR-NAME/ser-ravdess",
+        repo_type="model",
+    )
+    PY
+
+  Then the model is loadable with:
+      AutoModelForAudioClassification.from_pretrained("YOUR-NAME/ser-ravdess")
+  and you can skip the download step in section 9.
+
+--- OPTION C: automated release via GitHub Actions ---------------------------
+
+  .github/workflows/release.yml verifies a bundle and attaches it to a release:
+    * it refuses a bundle whose label order differs from the repo's classes
+    * it refuses a truncated weight file
+    * it publishes SHA256SUMS next to the zip
+  Trigger it from the Actions tab: "Release model bundle" > Run workflow >
+  paste a direct download URL for model.zip + a tag name.
+  Note: Google Drive share links are NOT direct links; use a release asset,
+  an HF Hub URL, or a link that ends in the file itself.
+
+================================================================================
+8. DEPLOY: GITHUB ACTIONS
+================================================================================
+There is nothing to install: GitHub runs the workflows in .github/workflows/
+automatically. Two are included.
+
+8.1  ci.yml - runs on every push and pull request
+     Five checks, about 3 minutes total:
+       lint-and-test     every .py file compiles; unit tests pass; the full
+                         data path runs on a 128-clip offline fixture
+                         (split -> augment -> cache) on Python 3.10 and 3.12
+       dataset-contract  asks the Hugging Face dataset server whether
+                         xbgoose/ravdess still has 1,440 rows / 24 actors /
+                         8 labels. If the dataset is re-uploaded with different
+                         shape, you find out before you train on it.
+       train-smoke       manual only (Actions > CI > Run workflow). Downloads
+                         torch + wav2vec2 (~500 MB) and trains one epoch on
+                         synthetic audio, to prove the real loop still works.
+
+     Where to look:
+       github.com/<user>/Real_time_speech_emotion/actions
+       Green tick = good. Red cross = click it, open the failed step, read the
+       last ~20 lines. Section 12 maps the usual messages to fixes.
+
+8.2  release.yml - publishes a model bundle (section 7, Option C)
+
+8.3  What CI deliberately does NOT do
+     * It does not train the real model. Training needs a GPU and 15 minutes of
+       compute; doing it on every push would be slow and wasteful. Training is
+       Colab's job.
+     * It does not deploy a live website. If you want one, the model is a static
+       file plus a small server - see section 9 part D.
+
+8.4  Protecting the main branch (optional, recommended)
+     Settings > Branches > Add branch protection rule >
+       Branch name pattern: main
+       tick "Require status checks to pass before merging"
+       tick "lint-and-test"
+     Now nobody (including you at 2 a.m.) can merge a change that breaks the
+     tests.
+
+================================================================================
+9. RUN THE DEMO
+================================================================================
+Part A - download and load the model
+
+  A.1  Get model.zip (from the release, or the file Colab downloaded).
+  A.2  Unzip so that you have a folder, e.g.:
+           C:\Users\you\models\ser\model\     (Windows)
+           ~/models/ser/model/                (mac/Linux)
+       Inside it: config.json, model.safetensors, preprocessor_config.json
+  A.3  Start the server from the repo folder, pointing at that folder:
+
+           python app/server.py --model "C:\Users\you\models\ser\model"
+
+       or with the CLI:
+
+           ser serve --model ~/models/ser/model
+
+       You should see:
+           model=.../model  device=cpu  labels=['angry','calm',...]  window=4.0s
+           serving on http://0.0.0.0:8000  (model_loaded=True)
+
+  A.4  Open http://localhost:8000 in a browser. The badge top-right should say
+       "trained model". If it says "no model loaded", the path is wrong - see
+       section 12.
+
+  A.5  Upload a 2-6 second WAV of speech (your own voice is best) and press
+       Analyse. You get 8 percentages. The highest is highlighted.
+
+  The model card note in the UI is deliberate: this is acted speech from 24
+  actors; it estimates acoustics, not a person's real feelings.
+
+Part B - command line instead of the web page
+
+    ser predict --audio "C:\path\to\clip.wav" --model ~/models/ser/model
+
+  Expected: a ranked list with percentages and a bar chart in text.
+
+Part C - live microphone (optional)
+
+    ser serve ... does not capture a mic; the browser does. Two options:
+
+    C.1 Browser recording (works everywhere, nothing to install):
+        On the demo page press "Record 4 s", allow the microphone, then
+        Analyse.
+        - Chrome/Edge/Firefox on localhost: fine.
+        - Safari on iOS requires HTTPS; localhost over http will not ask.
+        - If the button does nothing, the page is not on localhost and not on
+          HTTPS. See section 12.
+
+    C.2 Native mic from the terminal (Linux/macOS):
+        ser predict needs a file, so use the live module:
+            python -c "import sys;sys.path.insert(0,'src');from ser.live import main;main()" --model ~/models/ser/model
+        or simply:
+            python src/ser/live.py --model ~/models/ser/model
+        First run `python src/ser/live.py --list-devices` and pick your real
+        input device - the default is often a webcam or HDMI, which records
+        silence and makes it look broken.
+
+Part D - putting it on the internet (optional)
+
+  The demo is a single Python file (app/server.py) with no framework, so most
+  free hosts run it as-is. The requirement is always the same: the host must be
+  able to run `python app/server.py --port $PORT` and the model folder must be
+  present.
+
+  * Hugging Face Spaces (free, no card): create a Space with the "Docker" SDK,
+    copy app/ + src/ in, put the model in the repo via git-lfs, and set the
+    start command to `python app/server.py --port 7860`. Spaces are public by
+    default.
+  * Render / Railway / Fly.io: free or cheap tiers; start command
+    `python app/server.py --port $PORT`; add model.zip download as a build
+    step or commit the unzipped model with git-lfs.
+  * Streamlit Community Cloud: needs a ~15-line streamlit wrapper around
+    ser.predict.EmotionPredictor. Free, but the app sleeps after inactivity.
+
+  Whichever you pick: keep model.zip under 500 MB and set the host's memory to
+  at least 2 GB. wav2vec2-base is ~380 MB in RAM plus the Python runtime.
+
+================================================================================
+10. WHAT CI DOES ON EVERY PUSH (AND HOW TO RUN IT LOCALLY)
+================================================================================
+Run the same checks yourself before pushing - it is faster than waiting for
+GitHub:
+
+    python tests/test_pipeline.py                 # 60+ checks, ~1 second
+    python app/server.py --self-test              # web plumbing, no model
+    python tests/check_dataset_contract.py        # dataset unchanged?
+    python tests/make_offline_fixture.py --out /tmp/ravfix
+    ser prepare --config configs/local_train.yaml --dry-run \
+        --set data.source=/tmp/ravfix run.output_dir=/tmp/run
+
+  "ALL TESTS PASSED", "self-test OK" and "DATASET CONTRACT OK" mean CI will
+  almost certainly pass too.
+
+================================================================================
+11. REPO MAP: WHICH FILE DOES WHAT
+================================================================================
+START HERE
+  process.txt                 this file
+  instructions.txt            deep technical analysis of the ORIGINAL code: every
+                              bug, with evidence and fixes. Read section 4-6 if
+                              you want to know why the old numbers were wrong.
+  README.md                   short overview
+
+TRAIN AND EVALUATE
+  src/ser/data.py             load the dataset (Hugging Face or a local folder)
+  src/ser/labels.py           the 8 emotions, in one place, with aliases
+  src/ser/prepare.py          load -> split by actor -> augment -> cache
+  src/ser/splits.py           speaker-disjoint 16/4/4 split + sanity checks
+  src/ser/augment.py          noise, room echo, telephone filter, speed, pitch
+  src/ser/features.py         cache format (no pickles, compressed)
+  src/ser/train.py            the training loop (warmup, cosine, GradScaler,
+                              class weights, checkpointing, resume)
+  src/ser/evaluate.py         honest evaluation on unseen actors + CI gate
+  src/ser/metrics.py          accuracy, macro F1, weighted F1, per-class,
+                              confusion matrix, majority baseline
+  src/ser/plots.py            confusion matrix / per-class / curve figures
+  src/ser/config.py           YAML + SER_* environment overrides
+  src/ser/cli.py              `ser prepare|train|evaluate|predict|audit|export|serve`
+
+DEMO
+  app/server.py               web server (standard library only) + --self-test
+  app/index.html              the page (upload, record, bars)
+  src/ser/predict.py          model loader + predictions
+  src/ser/live.py             optional native microphone loop
+
+CONFIG
+  configs/local_train.yaml    laptop / small GPU, full data
+  configs/colab_train.yaml    Colab T4, 6 epochs, 4x augmentation
+  configs/ci_smoke.yaml       tiny, CPU, for tests
+
+AUTOMATION
+  .github/workflows/ci.yml        tests, data path, app, dataset contract
+  .github/workflows/release.yml   verify + publish a model bundle
+
+TESTS
+  tests/test_pipeline.py          unit tests (no network, no torch)
+  tests/make_offline_fixture.py   synthetic RAVDESS-shaped corpus
+  tests/check_dataset_contract.py upstream dataset sanity
+
+NOTEBOOK
+  notebooks/colab_train.ipynb     the step-by-step Colab flow from section 5
+
+LEGACY (kept for reference, superseded)
+  live_emotion.py  tes_audio.py  test_model.py  test_microphone.py
+  notebooks/speech_emotion_finetuning_v3.ipynb
+  These are the original scripts. They load a THIRD-PARTY model
+  (Dpngtm/wav2vec2-emotion-recognition), not this repo's checkpoint, and
+  notebooks/README.md documents numbers from a run that had 84% of its data
+  silently dropped. Do not use them for results; keep them only as history.
+
+================================================================================
+12. TROUBLESHOOTING: SYMPTOM -> CAUSE -> FIX
+================================================================================
+Jump to the message you see. Numbers in brackets are the matching section above.
+
+--- SETUP -------------------------------------------------------------------
+"python: command not found" / "'python' is not recognized"
+    Python is not installed, or not on PATH.
+    -> Windows: reinstall from python.org, TICK "Add Python to PATH".
+    -> macOS/Linux: try `python3` instead of `python`.
+
+"ser: command not found"
+    (a) the virtual environment is not active -> re-run the activate command
+        from 3.2; your prompt must start with (.venv)
+    (b) use `python -m ser ...` instead - it works without the shortcut.
+
+"running scripts is disabled on this system" (PowerShell)
+    -> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+       then reopen PowerShell.
+
+pip fails with "Microsoft Visual C++ 14.0 is required" (Windows)
+    A package has no prebuilt wheel for your Python. Use Python 3.11 or 3.12
+    (64-bit), not 3.13, then `pip install -e ".[train]"` again.
+
+pip fails with "No matching distribution found for torch"
+    Your Python is too new (3.13+) or the platform is unsupported.
+    -> install Python 3.11/3.12, or
+       pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+"(.venv) disappears after closing the terminal"
+    Expected. Re-activate each time you come back (3.2).
+
+--- DATA DOWNLOAD -----------------------------------------------------------
+"TLS/SSL connection has been closed", "ConnectionError",
+"Couldn't reach 'https://huggingface.co'", or "LocalEntryNotFoundError"
+    Network, corporate proxy, antivirus, or HF is down.
+    -> test the network:  curl -I https://huggingface.co
+    -> retry; then try a phone hotspot to rule out the network
+    -> behind a strict proxy: export HTTPS_PROXY=http://host:port
+    -> if only the DATASET is blocked, download the repo files on another
+       machine: https://huggingface.co/datasets/xbgoose/ravdess/tree/main
+       then run with `--set data.source=/path/to/ravdess_folder`
+       (any folder of 03-01-05-01-01-01-01.wav files works)
+
+"OSError: ... is not a valid model identifier" / "Incorrect path_or_model_id"
+    You pointed --model at a folder that is not a model.
+    Check it contains config.json AND model.safetensors (or pytorch_model.bin).
+
+Download starts then stops around a few hundred MB
+    Disk full or the connection dropped. Check free space (need ~2 GB), then
+    delete the partial cache and retry:
+      Linux/macOS: rm -rf ~/.cache/huggingface/hub
+      Windows    : delete C:\Users\you\.cache\huggingface\hub
+
+"row count/actor count changed" in `ser audit`
+    Upstream dataset changed, or you pointed at the wrong folder. Section 2
+    lists the expected numbers. If it really changed, re-check
+    data.window_s and re-run `ser prepare`; the split is rebuilt automatically.
+
+--- TRAINING ----------------------------------------------------------------
+"CUDA out of memory"
+    The batch does not fit the GPU.
+    -> lower it:  --set train.batch_size=4  (then 2)
+    -> shorten clips: --set data.window_s=3.0
+    -> in Colab: Runtime > Restart runtime, then re-run (a previous run may be
+       holding memory)
+    A T4 with 15 GB handles batch 8 x 4 s comfortably; an OOM means something
+    else is also loaded.
+
+Training runs on CPU / "NOTE: training on CPU"
+    Colab assigned a CPU runtime.
+    -> Runtime > Change runtime type > T4 GPU > Save, then re-run from Step 1.
+    Locally this is normal; section 4.4 explains what to expect.
+
+Loss stays the same or becomes "nan"
+    (a) learning rate too high -> --set train.lr=0.00001
+    (b) fp16 trouble on an old GPU -> --set train.fp16=false
+    (c) a corrupt clip got through -> re-run `ser prepare` and read the
+        "skipped" count; it should be 0.
+
+Every epoch's macro F1 is ~0.12-0.15 (chance level)
+    The model is not learning anything - almost always data.
+    -> run `ser audit` and look for a class with 0 clips
+    -> check data.window_s is 4.0, not 0.4
+    -> check the report says "labels=['angry','calm',...]" (8 sane names)
+
+Validation great, test terrible (0.75 vs 0.45)
+    Actor leakage. Open runs/*/data/split_report.json and read "problems".
+    If it mentions "appear in both", delete that splits.json and re-run:
+        rm runs/local/data/splits.json && ser prepare ...
+
+"the training split is empty" / "train split has no examples"
+    data.limit is too small: every loaded clip landed on held-out actors.
+    -> raise data.limit, or lower data.val_frac / data.test_frac.
+
+Colab: "Runtime disconnected" mid-epoch
+    Free-tier behaviour. Checkpoints are written every epoch (and to Drive if
+    Step 4 ran). Re-open, re-run Steps 1-5, and Step 6 resumes
+    (config has `resume: true`). At most one epoch is lost.
+
+Colab: "You are over your disk quota" or Drive writes hang
+    Each epoch writes ~380 MB of weights plus ~700 MB of optimiser state.
+    -> set `train.resume: false` so last.pt is not rewritten, and
+    -> keep only runs/full/best and the latest epoch on Drive; delete older
+       epoch_N folders after training finishes.
+
+--- RESULTS ----------------------------------------------------------------
+Accuracy is 1.00 (100%) - amazing!
+    It is not. On this dataset that means leakage or evaluating on training
+    data. Check:
+      * did you evaluate runs/*/best on the TEST split? (ser evaluate does)
+      * does split_report.json show "problems": [] ?
+      * did you accidentally point --model at the pretrained base model with a
+        freshly initialised head? (that scores ~0.12, not 1.00)
+
+macro F1 0.36 but weighted F1 0.48
+    This is exactly what the OLD version of this repo reported. It means some
+    classes are never predicted. Look at the per-class table:
+    any recall 0.00 is a class the model gave up on.
+    -> that class needs more data or augmentation copies (augment.copies=4)
+
+"NO TEST DATA" next to an emotion
+    None of the 4 test actors has that emotion recorded.
+    -> increase data.test_frac to 0.25 (6 actors), or
+    -> merge tiny classes (see instructions.txt, C-2) rather than report a
+       number that hides them
+
+--- DEMO / WEB APP ----------------------------------------------------------
+"no model loaded" in the page, or HTTP 503
+    The server started but could not find/load the checkpoint.
+    Look at the terminal where you started it - it prints the exact error.
+    -> pass an absolute path with quotes:
+       python app/server.py --model "C:\Users\you\models\ser\model"
+    -> verify the folder contains config.json + model.safetensors
+
+"Address already in use" / port 8000 busy
+    Another program (or a previous run) holds the port.
+    -> python app/server.py --model ... --port 8010
+
+Browser: "Cannot reach the server" / blank page
+    (a) the server is not running (check the terminal)
+    (b) you opened the HTML file directly instead of http://localhost:8000
+        - the page must be served by the server, not opened from disk.
+
+"Microphone unavailable" / Record button does nothing
+    Browsers only allow microphone access on https:// or on localhost.
+    -> use http://localhost:8000, not http://127.0.0.1.lan or a file:// URL
+    -> or use the upload button / `ser predict --audio file.wav`
+    -> iPhone/Safari needs HTTPS: use uploads, or host the app with HTTPS
+
+Upload rejected: "unsupported file type"
+    Allowed: wav, flac, ogg, mp3, m4a, aiff. Convert with:
+      ffmpeg -i input.m4a -ar 16000 -ac 1 output.wav
+    WAV at 16 kHz mono is the safest.
+
+Upload rejected: "file too large"
+    Limit is 12 MB. Clips are 2-6 seconds; a whole song will not work and
+    would be cut to 4 seconds anyway.
+
+Predictions are all ~12.5% (uniform)
+    That is a model that knows nothing: usually the base wav2vec2 with a fresh
+    random head, i.e. training never happened or you pointed at the wrong
+    folder. Confirm the folder you use has `labels.json` next to it and that
+    its metrics.json shows a real number.
+
+Predictions look random for my voice but good for the dataset
+    Expected for some voices - 24 actors, acted speech, studio recordings.
+    This is the honest limit of the dataset (section 15), not a bug.
+
+--- GITHUB ACTIONS ----------------------------------------------------------
+Red X on a workflow
+    Actions > click the run > click the failed job > expand the red step >
+    read the LAST 20 lines (the first error is usually a consequence).
+  * "unit tests" failing -> run `python tests/test_pipeline.py` locally; it
+    prints the same failure with the same names
+  * "data path" failing -> usually the offline fixture: re-run
+    `python tests/make_offline_fixture.py --out /tmp/ravfix`
+  * "dataset contract" failing -> the upstream dataset changed. This job is
+    marked continue-on-error so it will not block you; read its output.
+  * "Permission denied" pushing -> Settings > Actions > General > Workflow
+    permissions > "Read and write permissions"
+
+Workflow never runs
+    Check the file is exactly .github/workflows/ci.yml (not
+    github/workflows, not ci.yaml.txt). GitHub only reads YAML in that exact
+    path on the default branch.
+
+Release workflow fails with "No bundle provided"
+    You ran it manually without a bundle_url, or the tag has no model.zip
+    attached. Provide a direct file URL (not a Drive preview page).
+
+--- PUBLISHING --------------------------------------------------------------
+"remote: error: File ... is 380 MB; this exceeds GitHub's file size limit"
+    You tried to commit the model. Do not. Use a Release asset (7A) or HF Hub
+    (7B). If it is already in your history, remove it with git-filter-repo,
+    not by deleting the file in a new commit (the blob stays in history).
+
+Google Drive link gives a virus-scan page instead of the file
+    That is Drive's interstitital for large files. It is not a direct link, so
+    GitHub Actions cannot use it. Use a Release asset or HF Hub URL.
+
+================================================================================
+13. IF YOU ARE NOT TECHNICAL: THE ABSOLUTE MINIMUM PATH
+================================================================================
+If you only want a working demo and someone technical is on hand for step 3:
+
+  1. Ask them to install Python 3.11 and Git on your machine.
+  2. Open https://colab.research.google.com, load
+     notebooks/colab_train.ipynb from GitHub, set Runtime > T4 GPU, and press
+     play on Steps 1 to 10 in order. Read the checkpoint lines: Step 5 must
+     say "DATASET OK", Step 6 must show macro F1 going up.
+  3. Keep model.zip from Step 9 and run_record.json from Step 10.
+  4. Ask them to attach model.zip to a GitHub Release (section 7A).
+  5. To use it: open a terminal in the repo folder, activate the environment,
+     and run:
+         python app/server.py --model "the unzipped folder"
+     then open http://localhost:8000 and upload a short WAV.
+
+  If any step does not look like the description, stop and use section 12 -
+  do not continue past a failure, because each step depends on the previous.
+
+================================================================================
+14. GLOSSARY
+================================================================================
+accuracy          fraction of guesses that were right. Hides class failures.
+augmentation      making extra copies of a clip with small distortions, so the
+                  model does not memorise one recording.
+actor / speaker   a person in the dataset. 24 here. Splitting by actor is what
+                  makes the score meaningful.
+checkpoint        a saved copy of the model at one moment (each epoch).
+epoch             one full pass over the training data.
+F1                balance of precision (when it says "angry", how often is it
+                  right?) and recall (of the truly angry clips, how many did it
+                  find?). Macro F1 averages it equally over classes.
+fp16              half-precision maths on the GPU, ~2x faster, slightly less
+                  exact. Needs a "scaler" to avoid silently broken gradients.
+inference         using a trained model to make predictions (no learning).
+leakage           test data influenced training or model choice. Makes scores
+                  look better than reality. Prevented by actor-disjoint splits.
+macro / weighted  unweighted average over classes / average weighted by class
+                  size. Macro exposes dead classes; weighted hides them.
+wav2vec2          a speech model pretrained on raw audio; we attach a small
+                  8-way classifier and fine-tune that.
+fine-tuning       continuing to train a pretrained model on your own small data.
+
+================================================================================
+15. HONEST LIMITS OF THIS PROJECT
+================================================================================
+Read this before quoting a number to anyone.
+
+1. The dataset is small and acted. 24 actors reading two fixed sentences in a
+   studio, in extreme performed emotions. Real conversation is far harder:
+   people express emotion with subtlety, context and words, none of which this
+   model sees. Expect a large drop on natural speech.
+
+2. 8 classes is the hard version. "Calm" vs "neutral" and "fearful" vs
+   "surprised" are acoustically close; published work often merges them.
+   instructions.txt explains how to switch to 7 classes (calm -> neutral).
+
+3. The model has never been tested on a second dataset. The previous version of
+   this repo compared checkpoints on TESS, but selected its "best" checkpoint
+   using that very test set, so the reported 52.54% is optimistic. This
+   pipeline fixes the method (selection on validation) but the only honest
+   cross-corpus check is still missing - that is the next experiment worth
+   running.
+
+4. It is not a lie detector or an emotion sensor. It maps acoustic patterns to
+   labels learned from actors. Two speakers can share acoustics with different
+   feelings. Never use it to judge a person, and never present its output as a
+   measurement of how someone feels.
+
+5. Latency was not benchmarked here. On CPU, expect roughly 100-400 ms per 4 s
+   clip for wav2vec2-base on a modern laptop; the demo prints its own timing so
+   you can measure yours instead of trusting that range.
+
+6. Licensing: RAVDESS is distributed for research (CC BY-NC-SA style terms on
+   the original distribution). Check before publishing weights or using this
+   commercially.
