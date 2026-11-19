@@ -1,0 +1,41 @@
+# Google Colab (free T4). Same code, bigger budget and more augmentation.
+#   python -m ser.train --config configs/colab_train.yaml
+# Free-tier limits: ~12 h session, ~90 min idle disconnect. Checkpoints go to
+# Drive every epoch so a disconnect does not lose the run (see process.txt).
+
+run:
+  seed: 42
+  device: cuda
+  output_dir: /content/ser_runs/full
+  num_workers: 2
+
+data:
+  source: xbgoose/ravdess
+  limit: null
+  window_s: 4.0
+  val_frac: 0.17
+  test_frac: 0.17
+  splits_file: /content/ser_runs/full/data/splits.json
+
+model:
+  name: facebook/wav2vec2-base
+  n_classes: 8
+  freeze_feature_extractor: true
+
+augment:
+  copies: 4                 # 1,152 train clips -> ~5.8 k with rare-class boost
+  preset: full
+  scale: 1.0
+  bootstrap: 6
+
+train:
+  epochs: 6
+  batch_size: 8             # T4 15 GB handles 8 x 4 s
+  grad_accum: 2
+  lr: 0.00003
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  class_weight_mode: sqrt
+  max_grad_norm: 1.0
+  fp16: true
+  resume: true              # continue after a disconnect

@@ -1,0 +1,132 @@
+name: Release model bundle
+
+# Triggered by pushing a tag like v1.0.0, or manually with a run id in Colab
+# already uploaded as an artifact.
+#
+# What it does:
+#   1. takes a model bundle (a folder with config.json, model.safetensors,
+#      preprocessor_config.json, labels.json and metrics.json)
+#   2. verifies the bundle can be loaded and its labels are the expected ones
+#   3. publishes it as a GitHub Release asset, so the demo can download it
+#
+# A GitHub Release asset is used because the free tier gives 2 GB of release
+# storage and no server to maintain. Hugging Face Hub is the alternative (see
+# process.txt) if you want `from_pretrained("your-name/ser-ravdess")` to work.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bundle_url:
+        description: "Direct URL to a model bundle zip (e.g. a Colab/Drive direct link)"
+        required: true
+        type: string
+      tag:
+        description: "Tag to publish under (e.g. v1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install verification dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install transformers numpy soundfile pyyaml
+
+      - name: Fetch the model bundle
+        env:
+          BUNDLE_URL: ${{ inputs.bundle_url }}
+        run: |
+          mkdir -p bundle
+          if [ -n "$BUNDLE_URL" ]; then
+            echo "downloading $BUNDLE_URL"
+            curl -fL --retry 3 --max-time 900 -o bundle/model.zip "$BUNDLE_URL"
+            unzip -q -o bundle/model.zip -d bundle/model
+          elif [ -f model/model.zip ]; then
+            unzip -q -o model/model.zip -d bundle/model
+          else
+            echo "No bundle provided."
+            echo "Attach model.zip to the tag, or run this workflow manually"
+            echo "with bundle_url=... See process.txt 'Publishing the model'."
+            exit 1
+          fi
+          find bundle/model -maxdepth 3 -type f | head -40
+
+      - name: Verify the bundle is loadable and labelled correctly
+        run: |
+          python - <<'PY'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0, "src")
+          from ser.labels import CLASSES
+
+          root = Path("bundle/model")
+          dirs = [p.parent for p in root.rglob("config.json")]
+          assert dirs, "no config.json found: this is not a model folder"
+          d = dirs[0]
+          print("model dir:", d)
+
+          from transformers import AutoModelForAudioClassification
+          model = AutoModelForAudioClassification.from_pretrained(str(d))
+          labels = [model.config.id2label[i] for i in sorted(model.config.id2label)]
+          print("labels:", labels)
+          assert model.config.num_labels == len(CLASSES), (
+              f"checkpoint has {model.config.num_labels} labels, expected "
+              f"{len(CLASSES)}")
+          assert labels == CLASSES, f"label order differs: {labels} != {CLASSES}"
+
+          weights = list(d.glob("*.safetensors")) + list(d.glob("pytorch_model.bin"))
+          assert weights, "no weight file in the bundle"
+          size_mb = sum(w.stat().st_size for w in weights) / 1e6
+          print(f"weights: {size_mb:.0f} MB")
+          assert size_mb > 10, "weight file looks truncated"
+
+          meta = d.parent / "labels.json"
+          if meta.is_file():
+              m = json.loads(meta.read_text())
+              assert m.get("classes") == CLASSES, "labels.json disagrees"
+          print("BUNDLE VERIFIED")
+          Path("bundle/VERIFIED").write_text("ok")
+          PY
+
+      - name: Compute checksums
+        run: |
+          cd bundle/model && find . -type f \( -name '*.safetensors' -o -name '*.bin' \) \
+            -exec sha256sum {} \; | tee ../../bundle/SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: "SER model ${{ inputs.tag || github.ref_name }}"
+          body: |
+            Speech emotion recognition checkpoint (wav2vec2-base, 8 classes).
+
+            Download `model.zip`, unzip it, and point the demo at it:
+
+            ```
+            python app/server.py --model path/to/best
+            python -m ser.predict --audio clip.wav --model path/to/best
+            ```
+
+            Verify the download with SHA256SUMS.
+          files: |
+            bundle/model.zip
+            bundle/SHA256SUMS
+          fail_on_unmatched_files: false
+          draft: false

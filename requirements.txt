@@ -1,8 +1,24 @@
-transformers
-torch
-numpy
-librosa
-sounddevice
-scipy
-scikit-learn
-matplotlib
+# Core (data, augmentation, tests) -- small, installs in ~20 s.
+# Pinned to ranges that are known to coexist; see process.txt for the why.
+numpy>=1.24,<2.3
+soundfile>=0.12,<0.15
+pyyaml>=6.0
+
+# Training + inference
+torch>=2.1,<3
+transformers>=4.40,<5
+datasets>=2.19,<3.6          # <3.6 keeps the audio decoder out of torchcodec
+accelerate>=0.30
+huggingface_hub>=0.23
+
+# Optional but recommended
+librosa>=0.10.1,<0.11        # better resampling / pitch shift
+scikit-learn>=1.3,<1.6       # extra metrics if you want them
+matplotlib>=3.7              # figures in reports/
+tqdm>=4.66
+
+# Demo (skip on a headless server)
+sounddevice>=0.4.6
+
+# Development
+pytest>=7.4

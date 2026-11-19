@@ -1,0 +1,35 @@
+# GitHub Actions smoke test: must finish in a few minutes on a 2-core CPU.
+# Deliberately tiny (72 clips), so it proves the pipeline runs, not that it learns.
+
+run:
+  seed: 0
+  device: cpu
+  output_dir: runs/ci
+  num_workers: 0
+
+data:
+  source: xbgoose/ravdess
+  limit: 72                 # first 72 rows: only 3 actors -> tests the split guard
+  window_s: 2.0
+  val_frac: 0.25
+  test_frac: 0.25
+  splits_file: runs/ci/data/splits.json
+
+model:
+  name: facebook/wav2vec2-base
+  n_classes: 8
+  freeze_feature_extractor: true
+
+augment:
+  copies: 0                 # keep CI fast; augmentation is tested separately
+
+train:
+  epochs: 1
+  batch_size: 2
+  grad_accum: 1
+  lr: 0.0001
+  warmup_ratio: 0.1
+  class_weight_mode: sqrt
+  max_grad_norm: 1.0
+  fp16: false
+  resume: false
