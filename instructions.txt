@@ -33,6 +33,9 @@ Section 16 Ready-to-apply patch snippets.
 Section 17 Facts measured from the committed notebook outputs (evidence log).
 Section 18 Open questions that cannot be answered from the repo.
 
+See also: augment/FINDINGS.md  (data sync verdict + augmentation plan)
+          augment/README.md    (audit / split / augment tooling, tested)
+
 Severity legend:
   BLOCKER   - the documented workflow cannot complete, or ships a wrong result
   CRITICAL  - result is wrong / invalid, silently
