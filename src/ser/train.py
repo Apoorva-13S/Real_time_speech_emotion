@@ -90,7 +90,7 @@ def make_loader(x, y, batch_size: int, shuffle: bool, weights=None,
     sampler = None
     if weights is not None and shuffle:
         per_clip = np.asarray(weights)[y]
-        sampler = WeightedRandomSampler(per_clip, num_examples=len(y),
+        sampler = WeightedRandomSampler(per_clip, num_samples=len(y),
                                         replacement=True)
         shuffle = False
     gen = torch.Generator().manual_seed(seed)
@@ -315,12 +315,12 @@ def train(cfg: dict) -> dict:
         "seed": seed,
         "device": str(device),
         "split": actor_split,
-        "split_info": info,
+        "split_info": getattr(prep, "split_info", None),
         "best_epoch": best["epoch"],
         "history": history,
         "val": val_res,
         "test": test_res,
-        "augmentation": {"copies": aug_copies,
+        "augmentation": {"copies": getattr(prep, "aug_copies", None),
                          "preset": cfgmod.get(cfg, "augment.preset", "full"),
                          "train_clips": int(len(y_tr)),
                          "synthetic_fraction": round(prep.synthetic_fraction, 4)},
